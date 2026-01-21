@@ -1,0 +1,66 @@
+# ============================================================================
+# NemoDiT Policy Configuration for RoboTwin
+# ============================================================================
+#
+# This configuration file defines the parameters for deploying NemoDiT policy
+# in the RoboTwin platform.
+#
+# Basic Parameters (keep unchanged for RoboTwin compatibility):
+#   - policy_name, task_name, task_config, ckpt_setting, seed, instruction_type
+#
+# Model Parameters (NemoDiT specific):
+#   - n_obs_steps, n_action_steps, ddim_steps, use_both_arms, quat_convention
+#
+# ============================================================================
+
+# Basic RoboTwin parameters (will be overridden by command line)
+policy_name: NemoDiT
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# Checkpoint settings
+expert_data_num: 100
+checkpoint_num: 600
+
+# Camera configuration
+head_camera_type: D435
+
+# ============================================================================
+# NemoDiT Model Parameters
+# ============================================================================
+
+# Observation settings
+n_obs_steps: 1              # Number of observation history steps (currently 1)
+
+# Action settings
+n_action_steps: 10          # Number of action steps to execute per inference
+                            # Should match future_action_window from training
+
+# DDIM sampling settings
+ddim_steps: 10              # Number of DDIM denoising steps
+                            # Lower = faster but less accurate
+                            # Higher = slower but more accurate
+
+# Robot configuration
+use_both_arms: true         # Use dual arm mode (20D action space)
+                            # Set to false for single arm (10D action space)
+
+# Quaternion convention for output
+quat_convention: wxyz       # Options: wxyz or xyzw
+                            # Must match RoboTwin environment expectation
+
+# ============================================================================
+# Advanced Settings (optional)
+# ============================================================================
+
+# Direct checkpoint path (overrides task_name based path)
+# checkpoint_path: null
+
+# Model architecture (these are read from checkpoint by default)
+# model_type: DiT-B
+# token_size: 2048
+# vision_backbone: resnet50
+# adapter_type: attention_pooling
