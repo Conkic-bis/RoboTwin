@@ -42,6 +42,7 @@ class NemoDiT:
         device: str = "cuda:0",
         quat_convention: str = "wxyz",
         use_both_arms: bool = True,
+        action_type: str = "endpose",
     ):
         """
         Initialize NemoDiT model.
@@ -54,6 +55,7 @@ class NemoDiT:
             device: Device to run inference on
             quat_convention: Output quaternion convention ("wxyz" or "xyzw")
             use_both_arms: Whether to use dual arm mode
+            action_type: Action type - "endpose" or "joint"
         """
         self.device = device
         self.n_obs_steps = n_obs_steps
@@ -61,6 +63,7 @@ class NemoDiT:
         self.ddim_steps = ddim_steps
         self.quat_convention = quat_convention
         self.use_both_arms = use_both_arms
+        self.action_type = action_type
 
         # Load model
         self.model = self._load_model(ckpt_file)
@@ -73,10 +76,13 @@ class NemoDiT:
         self.obs_cache: Optional[Dict[str, deque]] = None
         self.action_queue: List[np.ndarray] = []
 
-        # Action dimension info
-        # Single arm: 10D (3 translation + 6 rot6d + 1 gripper)
-        # Dual arm: 20D (10D left + 10D right)
-        self.single_arm_dim = 10
+        # Action dimension info based on action_type
+        # endpose: Single arm: 10D (3 translation + 6 rot6d + 1 gripper), Dual arm: 20D
+        # joint: Single arm: 7D (6 joint + 1 gripper), Dual arm: 14D
+        if action_type == "endpose":
+            self.single_arm_dim = 10
+        else:  # joint
+            self.single_arm_dim = 7
 
     def _load_model(self, ckpt_file: str) -> ActionModel:
         """Load model from checkpoint."""
@@ -149,18 +155,28 @@ class NemoDiT:
 
     def _convert_action_to_robotwin(self, action: np.ndarray) -> np.ndarray:
         """
-        Convert model output (rot6d) to RoboTwin format (quaternion).
+        Convert model output to RoboTwin format.
+
+        For endpose action_type:
+            - Converts rot6d to quaternion
+            - Input: Single arm (T, 10) [x,y,z, r1-r6, gripper], Dual arm (T, 20)
+            - Output: Single arm (T, 8) [x,y,z, qw,qx,qy,qz, gripper], Dual arm (T, 16)
+
+        For joint action_type:
+            - No conversion needed, pass through directly
+            - Input/Output: Single arm (T, 7) [j1-j6, gripper], Dual arm (T, 14)
 
         Args:
             action: (T, action_dim) action sequence
-                    Single arm: (T, 10) - [x,y,z, r1-r6, gripper]
-                    Dual arm: (T, 20) - [left_10d, right_10d]
 
         Returns:
             Converted action in RoboTwin format
-            Single arm: (T, 8) - [x,y,z, qw,qx,qy,qz, gripper]
-            Dual arm: (T, 16) - [left_8d, right_8d]
         """
+        # For joint action type, no conversion needed
+        if self.action_type == "joint":
+            return action
+
+        # For endpose action type, convert rot6d to quaternion
         T = action.shape[0]
 
         if self.use_both_arms:
