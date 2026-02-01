@@ -160,15 +160,15 @@ class DiT(nn.Module):
     """
     def __init__(
         self,
-        in_channels=10,
-        hidden_size=1152,
-        depth=28,
-        num_heads=16,
+        hidden_size,
+        depth,
+        num_heads,
+        in_channels,
+        token_size,
+        future_action_window_size,
+        past_action_window_size=0,
         mlp_ratio=4.0,
         class_dropout_prob=0.1,
-        token_size=4096,
-        future_action_window_size=1,
-        past_action_window_size=0,
         learn_sigma=False,
     ):
         super().__init__()
@@ -234,10 +234,16 @@ class DiT(nn.Module):
     def forward(self, x, t, z):
         """
         Forward pass of DiT.
-        history: (N, H, D) tensor of action history # not used now
-        x: (N, T, D) tensor of predicting action inputs
-        t: (N,) tensor of diffusion timesteps
-        z: (N, 1, D) tensor of conditions
+
+        Args:
+            x: (N, T, in_channels) - noisy action sequence to denoise
+               T = future_action_window_size
+            t: (N,) - diffusion timesteps
+            z: (N, 1, token_size) - vision condition (single global feature)
+               通过 ResNet GAP 或 ViT CLS token 得到的全局视觉特征
+
+        Returns:
+            noise_pred: (N, T, in_channels) - predicted noise
         """
         x = self.x_embedder(x)                              # (N, T, D)
         t = self.t_embedder(t)                              # (N, D)

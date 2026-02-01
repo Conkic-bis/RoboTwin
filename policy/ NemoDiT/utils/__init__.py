@@ -1,7 +1,3 @@
-"""
-Utils package for Nemo-Diffusion-Transformer.
-"""
-
 from .rotation_utils import (
     quaternion_to_rotation_matrix,
     rotation_matrix_to_rot6d,

@@ -1,10 +1,3 @@
-"""
-train.py
-
-Training script for DiT-based robot action generation with vision conditioning.
-No VAE encoder is used - direct action prediction from visual observations.
-"""
-
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -27,24 +20,45 @@ def parse_args():
                         help='Path to robot dataset directory containing .hdf5 files')
     parser.add_argument('--num_cameras', type=int, default=4,
                         help='Number of camera views (default: 4)')
-    parser.add_argument('--use_both_arms', action='store_true', default=False,
-                        help='Use both arms data (default: False, single arm=10D, dual arm=20D)')
+    parser.add_argument('--use_both_arms', action='store_true', default=True,
+                        help='Use both arms data (default: False)')
+    parser.add_argument('--action_type', type=str, default='joint',
+                        choices=['endpose', 'joint'],
+                        help='Action type: endpose (ee pose) or joint (joint angles)')
     parser.add_argument('--quat_convention', type=str, default='wxyz',
                         choices=['wxyz', 'xyzw'],
-                        help='Quaternion convention in HDF5 data (default: wxyz)')
+                        help='Quaternion convention in HDF5 data (default: wxyz, only for endpose)')
 
     # Model arguments
-    parser.add_argument('--model_type', type=str, default='DiT-B',
-                        choices=['DiT-S', 'DiT-B', 'DiT-L'],
+    parser.add_argument('--model_type', type=str, default='DiT-XL',
+                        choices=['DiT-S', 'DiT-B', 'DiT-L', 'DiT-XL'],
                         help='DiT model size (default: DiT-B)')
-    parser.add_argument('--action_dim', type=int, default=10,
+    parser.add_argument('--dropout_prob', type=float, default=0,
+                        help='Class dropout probability for classifier-free guidance (default: 0.1)')
+    parser.add_argument('--action_dim', type=int, default=7,
                         help='Action dimension (default: 10 for 3D translation + 6D rot6d + 1D gripper)')
-    parser.add_argument('--future_action_window', type=int, default=10,
-                        help='Number of future action steps to predict (default: 10)')
+    parser.add_argument('--future_action_window', type=int, default=12,
+                        help='Number of future action steps to predict (default: 16)')
     parser.add_argument('--past_action_window', type=int, default=0,
                         help='Number of past action steps as context (default: 0)')
     parser.add_argument('--token_size', type=int, default=2048,
                         help='Token size for conditioning (default: 2048)')
+
+    # n_obs_steps: 观测步数，用于视觉编码的历史帧数
+    # n_obs_steps 的最后一帧对应动作序列的第一帧时刻
+    parser.add_argument('--n_obs_steps', type=int, default=2,
+                        help='Number of observation steps for visual conditioning (default: 2)')
+    # n_action_steps: 动作执行步数，推理时实际执行的动作步数
+    # 通常设置为 future_action_window 的一半或更少，用于 receding horizon control
+    parser.add_argument('--n_action_steps', type=int, default=8,
+                        help='Number of action steps to execute during inference (default: 8)')
+    # temporal_agg: 时间聚合方式
+    # - 'last': 只使用最后一帧观测
+    # - 'mean': 对所有观测帧取平均
+    # - 'concat': 拼接所有帧特征后投影
+    parser.add_argument('--temporal_agg', type=str, default='last',
+                        choices=['last', 'mean', 'concat'],
+                        help='Temporal aggregation method for multi-frame observations (default: last)')
 
     # Vision arguments
     parser.add_argument('--vision_backbone', type=str, default='resnet50',
@@ -54,9 +68,9 @@ def parse_args():
                         help='Use pretrained vision backbone')
     parser.add_argument('--freeze_vision', action='store_true', default=False,
                         help='Freeze vision backbone weights')
-    parser.add_argument('--adapter_type', type=str, default='attention_pooling',
+    parser.add_argument('--adapter_type', type=str, default='mlp',
                         choices=['linear', 'mlp', 'attention_pooling'],
-                        help='Feature adapter type (default: attention_pooling, pools vision features to single token)')
+                        help='Feature adapter type')
 
     # Diffusion arguments
     parser.add_argument('--diffusion_steps', type=int, default=100,
@@ -64,24 +78,37 @@ def parse_args():
     parser.add_argument('--noise_schedule', type=str, default='squaredcos_cap_v2',
                         help='Noise schedule type (default: squaredcos_cap_v2)')
 
-    # Training arguments
-    parser.add_argument('--batch_size', type=int, default=32,
-                        help='Batch size (default: 32)')
+    # Training arguments 
+    parser.add_argument('--batch_size', type=int, default=16,
+                        help='Batch size per GPU (default: 16)')
+
     parser.add_argument('--epochs', type=int, default=1000,
                         help='Number of training epochs (default: 1000)')
+                        
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate (default: 1e-4)')
-    parser.add_argument('--weight_decay', type=float, default=0.0,
-                        help='Weight decay (default: 0.0)')
+
+    # weight_decay: 权重衰减系数，用于L2正则化防止过拟合
+    # AdamW默认建议0.01，可根据数据集大小调整
+    # 数据集小时可适当增大（0.01-0.1），数据集大时可减小（0.0-0.01）
+    parser.add_argument('--weight_decay', type=float, default=0.01,
+                        help='Weight decay for L2 regularization (default: 0.01)')
+
+    # grad_clip: 梯度裁剪的最大范数，防止梯度爆炸
+    # 通常设置为1.0，如果训练不稳定可尝试减小到0.5
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm (default: 1.0)')
+
+    # num_workers: 数据加载的并行工作进程数
+    # 建议设置为CPU核心数的一半，最多不超过8
+    # 设置过高可能导致内存问题和进程间通信开销
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers (default: 4)')
 
     # Checkpoint arguments
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints (default: checkpoints)')
-    parser.add_argument('--save_every', type=int, default=10,
+    parser.add_argument('--save_every', type=int, default=100,
                         help='Save checkpoint every N epochs (default: 10)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
@@ -110,7 +137,7 @@ def prepare_dataloader(args):
                            std=[0.229, 0.224, 0.225])  # ImageNet normalization
     ])
 
-    # Create dataset
+    # Create dataset with n_obs_steps support
     dataset = RobotDataset(
         data_path=args.data_path,
         future_action_window=args.future_action_window,
@@ -118,7 +145,9 @@ def prepare_dataloader(args):
         transform=transform,
         num_cameras=args.num_cameras,
         use_both_arms=args.use_both_arms,
-        quat_convention=args.quat_convention
+        action_type=args.action_type,
+        quat_convention=args.quat_convention,
+        n_obs_steps=args.n_obs_steps,  # 多帧观测支持
     )
 
     # Create dataloader
@@ -151,6 +180,9 @@ def create_model(args):
         num_cameras=args.num_cameras,
         freeze_vision_backbone=args.freeze_vision,
         adapter_type=args.adapter_type,
+        class_dropout_prob=args.dropout_prob,
+        n_obs_steps=args.n_obs_steps,
+        temporal_agg=args.temporal_agg,
     )
 
     return model
@@ -162,7 +194,8 @@ def save_checkpoint(model, optimizer, epoch, global_step, args, filename=None):
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     if filename is None:
-        filename = f'dit_action_checkpoint_epoch_{epoch}_step_{global_step}.pt'
+        # Simple naming: {epoch}.pt to match eval script expectations
+        filename = f'{epoch}.pt'
 
     checkpoint_path = os.path.join(args.checkpoint_dir, filename)
 
@@ -205,9 +238,27 @@ def train():
     # Parse arguments
     args = parse_args()
 
+    # Auto-set action_dim based on action_type and use_both_arms
+    if args.action_type == 'endpose':
+        # End-effector pose: 3D translation + 6D rot6d + 1D gripper = 10D per arm
+        if args.use_both_arms:
+            args.action_dim = 20  # (3D + 6D + 1D) * 2 = 20D for dual arm
+        else:
+            args.action_dim = 10  # (3D + 6D + 1D) = 10D for single arm
+    else:  # joint
+        # Joint angles: 6D joint + 1D gripper = 7D per arm
+        if args.use_both_arms:
+            args.action_dim = 14  # (6D + 1D) * 2 = 14D for dual arm
+        else:
+            args.action_dim = 7   # (6D + 1D) = 7D for single arm
+
     # Set device
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    print(f"Action type: {args.action_type}")
+    print(f"Action dimension: {args.action_dim} ({'dual arm' if args.use_both_arms else 'single arm'})")
+    print(f"Temporal settings: n_obs_steps={args.n_obs_steps}, n_action_steps={args.n_action_steps}, "
+          f"future_action_window={args.future_action_window}, temporal_agg={args.temporal_agg}")
 
     # Create dataloader
     print("Loading dataset...")

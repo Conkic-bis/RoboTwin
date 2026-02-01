@@ -77,6 +77,8 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
             )
             ** 2
         )
+    
+    # 引入生成扩散过程中的噪声调度表
     elif beta_schedule == "linear":
         betas = np.linspace(beta_start, beta_end, num_diffusion_timesteps, dtype=np.float64)
     elif beta_schedule == "warmup10":

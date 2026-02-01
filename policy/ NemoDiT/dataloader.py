@@ -22,6 +22,11 @@ class RobotDataset(Dataset):
     │   │   ├── /endpose/left_gripper    (T, 1)  - gripper state (1-DoF)
     │   │   ├── /endpose/right_endpose   (T, 7)  - 3D translation + 4D quaternion
     │   │   └── /endpose/right_gripper   (T, 1)  - gripper state (1-DoF)
+    │   ├── /joint_action
+    │   │   ├── /joint_action/left_arm     (T, 6)  - 6-DoF joint angles
+    │   │   ├── /joint_action/left_gripper (T, 1)  - gripper state
+    │   │   ├── /joint_action/right_arm    (T, 6)  - 6-DoF joint angles
+    │   │   └── /joint_action/right_gripper(T, 1)  - gripper state
     │   └── /observation
     │       ├── /observation/front_camera/rgb   (T, H, W, 3)
     │       ├── /observation/head_camera/rgb    (T, H, W, 3)
@@ -29,19 +34,38 @@ class RobotDataset(Dataset):
     │       └── /observation/right_camera/rgb   (T, H, W, 3)
 
     Output action format (after conversion):
-        - Single arm: (T, 10) = 3D translation + 6D rot6d + 1D gripper
-        - Dual arm:   (T, 20) = (3D + 6D + 1D) * 2
+        action_type='endpose':
+            - Single arm: (T, 10) = 3D translation + 6D rot6d + 1D gripper
+            - Dual arm:   (T, 20) = (3D + 6D + 1D) * 2
+        action_type='joint':
+            - Single arm: (T, 7) = 6D joint angles + 1D gripper
+            - Dual arm:   (T, 14) = (6D + 1D) * 2
+
+    Diffusion Policy 时序设计:
+        n_obs_steps: 观测步数，用于视觉编码的历史帧数
+        n_action_steps: 动作执行步数，实际执行的动作数（< future_action_window）
+
+        时间轴示例 (n_obs_steps=2, n_action_steps=8, future_action_window=16):
+
+        ┌───┬───┬───┬───┬───┬───┬───┬───┬───┬───┐
+        │O-1│ O │ A │ A │ A │ A │ A │ A │ A │ A │...
+        └───┴───┴───┴───┴───┴───┴───┴───┴───┴───┘
+              │   └───────────────────────────────┘
+              │         future_action_window
+              │
+              └─── n_obs_steps 的最后一帧 = action 的第一帧时刻
 
     Args:
         data_path: Path to directory containing episode HDF5 files
         future_action_window: Number of future action steps to predict
-        past_action_window: Number of past action steps as context
+        past_action_window: Number of past action steps as context (deprecated, use n_obs_steps)
         transform: Optional transform to apply to images
         num_cameras: Number of camera views to use (default: 4)
         camera_names: List of camera names to use (default: all 4 cameras)
         use_both_arms: Whether to use both arms (default: False, only left arm)
-        action_mode: 'absolute' or 'relative' actions
+        action_type: 'endpose' for end-effector pose, 'joint' for joint angles
         quat_convention: Quaternion convention in HDF5 data, "wxyz" or "xyzw"
+        n_obs_steps: Number of observation steps for visual conditioning (default: 1)
     """
 
     def __init__(
@@ -53,8 +77,9 @@ class RobotDataset(Dataset):
         num_cameras: int = 4,
         camera_names: Optional[List[str]] = None,
         use_both_arms: bool = False,
-        action_mode: str = 'absolute',
+        action_type: str = 'endpose',  # 'endpose' or 'joint'
         quat_convention: str = 'wxyz',
+        n_obs_steps: int = 1,  # 观测步数
     ):
         super().__init__()
 
@@ -64,8 +89,14 @@ class RobotDataset(Dataset):
         self.transform = transform
         self.num_cameras = num_cameras
         self.use_both_arms = use_both_arms
-        self.action_mode = action_mode
+        self.action_type = action_type
         self.quat_convention = quat_convention
+        self.n_obs_steps = n_obs_steps
+
+        # Validate parameters
+        assert action_type in ['endpose', 'joint'], \
+            f"action_type must be 'endpose' or 'joint', got {action_type}"
+        assert n_obs_steps >= 1, f"n_obs_steps must be >= 1, got {n_obs_steps}"
 
         # Default camera names
         if camera_names is None:
@@ -81,6 +112,7 @@ class RobotDataset(Dataset):
         # Load episode file paths
         self.episode_files = self._load_episode_files()
         print(f"Found {len(self.episode_files)} episode files")
+        print(f"Action type: {action_type}")
 
         # Build index: (episode_idx, timestep)
         self.indices = self._build_indices()
@@ -100,21 +132,33 @@ class RobotDataset(Dataset):
         """
         Build valid indices for sampling.
 
+        考虑 n_obs_steps 的时序约束:
+        - 需要 n_obs_steps - 1 帧历史观测
+        - 需要 future_action_window 帧未来动作
+
         Returns:
-            List of (episode_idx, start_timestep) tuples
+            List of (episode_idx, action_start_timestep) tuples
+            action_start_timestep 是动作序列的起始帧（也是 n_obs_steps 的最后一帧）
         """
         indices = []
+
+        # pad_before: 观测序列开头需要的额外帧数
+        pad_before = self.n_obs_steps - 1
 
         for ep_idx, ep_file in enumerate(self.episode_files):
             with h5py.File(ep_file, 'r') as f:
                 # Get episode length from action data
-                left_endpose = f['endpose/left_endpose']
-                episode_length = left_endpose.shape[0]
+                if self.action_type == 'endpose':
+                    data_key = 'endpose/left_endpose'
+                else:  # joint
+                    data_key = 'joint_action/left_arm'
 
-                # Valid start timesteps
-                # Need past_action_window before and future_action_window after
-                for t in range(self.past_action_window,
-                              episode_length - self.future_action_window + 1):
+                episode_length = f[data_key].shape[0]
+
+                # Valid action start timesteps
+                # - 需要 pad_before 帧历史观测 (从 t - pad_before 到 t)
+                # - 需要 future_action_window 帧未来动作 (从 t 到 t + future_action_window - 1)
+                for t in range(pad_before, episode_length - self.future_action_window + 1):
                     indices.append((ep_idx, t))
 
         return indices
@@ -125,7 +169,7 @@ class RobotDataset(Dataset):
 
     def _load_actions(self, f: h5py.File, start_idx: int) -> np.ndarray:
         """
-        Load action sequences from HDF5 file and convert to rot6d representation.
+        Load action sequences from HDF5 file.
 
         Args:
             f: Open HDF5 file handle
@@ -133,9 +177,20 @@ class RobotDataset(Dataset):
 
         Returns:
             actions: (future_action_window, action_dim) numpy array
-                     Single arm: (T, 10) = 3D translation + 6D rot6d + 1D gripper
-                     Dual arm:   (T, 20) = (3D + 6D + 1D) * 2
+                     action_type='endpose':
+                         Single arm: (T, 10) = 3D translation + 6D rot6d + 1D gripper
+                         Dual arm:   (T, 20) = (3D + 6D + 1D) * 2
+                     action_type='joint':
+                         Single arm: (T, 7) = 6D joint angles + 1D gripper
+                         Dual arm:   (T, 14) = (6D + 1D) * 2
         """
+        if self.action_type == 'endpose':
+            return self._load_endpose_actions(f, start_idx)
+        else:  # joint
+            return self._load_joint_actions(f, start_idx)
+
+    def _load_endpose_actions(self, f: h5py.File, start_idx: int) -> np.ndarray:
+        """Load end-effector pose actions and convert to rot6d representation."""
         # Load left arm actions
         left_endpose_7d = f['endpose/left_endpose'][
             start_idx : start_idx + self.future_action_window
@@ -182,67 +237,141 @@ class RobotDataset(Dataset):
 
         return actions
 
+    def _load_joint_actions(self, f: h5py.File, start_idx: int) -> np.ndarray:
+        """Load joint angle actions."""
+        # Load left arm joint angles
+        left_joints = f['joint_action/left_arm'][
+            start_idx : start_idx + self.future_action_window
+        ]  # (T, 6) - 6-DoF joint angles
+        left_gripper = f['joint_action/left_gripper'][
+            start_idx : start_idx + self.future_action_window
+        ]  # (T,) or (T, 1) - gripper state
+
+        # Ensure correct shape
+        if left_joints.ndim == 1:
+            left_joints = left_joints[np.newaxis, :]
+        if left_gripper.ndim == 1:
+            left_gripper = left_gripper[:, np.newaxis]
+
+        if self.use_both_arms:
+            right_joints = f['joint_action/right_arm'][
+                start_idx : start_idx + self.future_action_window
+            ]  # (T, 6)
+            right_gripper = f['joint_action/right_gripper'][
+                start_idx : start_idx + self.future_action_window
+            ]  # (T,) or (T, 1)
+
+            if right_joints.ndim == 1:
+                right_joints = right_joints[np.newaxis, :]
+            if right_gripper.ndim == 1:
+                right_gripper = right_gripper[:, np.newaxis]
+
+            # Dual arm: (T, 14) = (6 + 1) * 2
+            actions = np.concatenate([
+                left_joints, left_gripper,
+                right_joints, right_gripper
+            ], axis=-1)
+        else:
+            # Single arm: (T, 7) = 6 + 1
+            actions = np.concatenate([
+                left_joints, left_gripper
+            ], axis=-1)
+
+        return actions
+
     def _load_images(self, f: h5py.File, timestep: int) -> List[np.ndarray]:
         """
         Load images from all cameras at a given timestep.
-        """
 
+        Handles both raw numpy arrays and JPEG/PNG encoded bytes.
+
+        Args:
+            f: HDF5 file handle
+            timestep: Single timestep to load
+
+        Returns:
+            List of images, one per camera, each (H, W, 3)
+        """
         images = []
 
         for cam_name in self.camera_names:
             img_path = f'observation/{cam_name}/rgb'
             img = f[img_path][timestep]
-            
-            # Debug: print type and shape
-            print(f"[DEBUG] {cam_name} type: {type(img)}, ", end="")
-            
+
             # Handle different storage formats
             if isinstance(img, bytes):
                 # Decode from bytes (JPEG/PNG encoded)
                 img_array = np.frombuffer(img, dtype=np.uint8)
                 img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # OpenCV loads as BGR
-                print(f"decoded shape: {img.shape}")
             elif isinstance(img, np.ndarray):
-                print(f"shape: {img.shape}, dtype: {img.dtype}")
+                # Already a numpy array
+                pass
             else:
                 raise TypeError(f"Unexpected image type: {type(img)}")
-            
+
             images.append(img)
 
         return images
 
+    def _load_obs_images(self, f: h5py.File, action_start_timestep: int) -> List[List[np.ndarray]]:
+        """
+        Load observation images for n_obs_steps frames.
+
+        n_obs_steps 的最后一帧对应 action_start_timestep。
+        例如 n_obs_steps=2, action_start_timestep=10:
+            加载 timestep 9 和 10 的图像
+
+        Args:
+            f: HDF5 file handle
+            action_start_timestep: 动作序列的起始帧（也是观测序列的最后一帧）
+
+        Returns:
+            List of length n_obs_steps, each element is List of images per camera
+            [[cam0_t0, cam1_t0, ...], [cam0_t1, cam1_t1, ...], ...]
+        """
+        obs_images = []
+
+        # 观测序列: 从 (action_start - n_obs_steps + 1) 到 action_start (包含)
+        obs_start = action_start_timestep - self.n_obs_steps + 1
+
+        for t in range(obs_start, action_start_timestep + 1):
+            frame_images = self._load_images(f, t)
+            obs_images.append(frame_images)
+
+        return obs_images
+
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-            """
-            Get a sample from the dataset.
+        """
+        Get a sample from the dataset.
 
-            Returns:
-                Dictionary containing:
-                    - 'images': (num_cameras, 3, H, W) tensor
-                    - 'actions': (future_action_window, action_dim) tensor
-                    - 'episode_idx': episode index
-                    - 'timestep': timestep within episode
-            """
-            episode_idx, timestep = self.indices[idx]
-            episode_file = self.episode_files[episode_idx]
+        Returns:
+            Dictionary containing:
+                - 'images': (n_obs_steps, num_cameras, 3, H, W) tensor - 多帧观测图像
+                - 'actions': (future_action_window, action_dim) tensor - 动作序列
+                - 'episode_idx': episode index
+                - 'timestep': action start timestep within episode
+        """
+        episode_idx, action_start_timestep = self.indices[idx]
+        episode_file = self.episode_files[episode_idx]
 
-            with h5py.File(episode_file, 'r') as f:
-                # Load actions
-                actions = self._load_actions(f, timestep)  # (T, action_dim)
+        with h5py.File(episode_file, 'r') as f:
+            # Load actions starting from action_start_timestep
+            actions = self._load_actions(f, action_start_timestep)  # (T, action_dim)
 
-                # Load images from current timestep
-                images = self._load_images(f, timestep)  # List of (H, W, 3)
+            # Load observation images for n_obs_steps frames
+            # obs_images: List[List[np.ndarray]] - [n_obs_steps][num_cameras]
+            obs_images = self._load_obs_images(f, action_start_timestep)
 
-            # Convert to torch tensors and apply transforms
-            action_tensor = torch.from_numpy(actions).float()
+        # Convert to torch tensors and apply transforms
+        action_tensor = torch.from_numpy(actions).float()
 
-            # Process images
-            image_tensors = []
-            for img in images:
-                # Debug
-                print(f"[DEBUG] Processing img type: {type(img)}, shape: {img.shape}, dtype: {img.dtype}")
-                
+        # Process images: obs_images[t][cam] -> (n_obs_steps, num_cameras, 3, H, W)
+        all_frame_tensors = []
+        for frame_images in obs_images:  # 遍历每个时间步
+            frame_tensors = []
+            for img in frame_images:  # 遍历每个相机
                 # Ensure uint8 format
                 if img.dtype != np.uint8:
                     if img.max() <= 1.0:
@@ -256,17 +385,21 @@ class RobotDataset(Dataset):
                 else:
                     img_tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
 
-                image_tensors.append(img_tensor)
+                frame_tensors.append(img_tensor)
 
-            # Stack images: (num_cameras, 3, H, W)
-            images_tensor = torch.stack(image_tensors, dim=0)
+            # Stack cameras for this frame: (num_cameras, 3, H, W)
+            frame_tensor = torch.stack(frame_tensors, dim=0)
+            all_frame_tensors.append(frame_tensor)
 
-            return {
-                'images': images_tensor,
-                'actions': action_tensor,
-                'episode_idx': episode_idx,
-                'timestep': timestep,
-            }
+        # Stack all frames: (n_obs_steps, num_cameras, 3, H, W)
+        images_tensor = torch.stack(all_frame_tensors, dim=0)
+
+        return {
+            'images': images_tensor,
+            'actions': action_tensor,
+            'episode_idx': episode_idx,
+            'timestep': action_start_timestep,
+        }
 
 
 class RobotDatasetLazy(Dataset):

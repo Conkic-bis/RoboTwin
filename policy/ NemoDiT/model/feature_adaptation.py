@@ -1,13 +1,6 @@
-"""
-feature_adaptation.py
-
-Projection layers to adapt vision features to DiT's expected token/hidden size.
-"""
-
 import torch
 import torch.nn as nn
 import math
-
 
 class FeatureAdapter(nn.Module):
     """
