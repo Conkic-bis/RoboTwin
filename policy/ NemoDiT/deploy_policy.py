@@ -11,6 +11,10 @@ This file provides the standard RoboTwin interface functions:
 
 IMPORTANT: We strongly recommend keeping the code logic unchanged.
            You can customize the implementation details within each function.
+
+Supported Action Types:
+- endpose: End-effector pose control (xyz + quaternion + gripper)
+- joint: Joint position control (6D joint + gripper)
 """
 
 import numpy as np
@@ -23,6 +27,9 @@ from .nemo_dit_model import NemoDiT
 # ImageNet normalization constants
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
 IMAGENET_STD = np.array([0.229, 0.224, 0.225])
+
+# Global variable to store action type for eval function
+_ACTION_TYPE = "endpose"
 
 
 def encode_obs(observation: Dict[str, Any]) -> Dict[str, np.ndarray]:
@@ -102,10 +109,13 @@ def get_model(usr_args: Dict[str, Any]) -> NemoDiT:
             - ddim_steps: DDIM sampling steps (default: 10)
             - use_both_arms: Whether to use dual arm (default: True)
             - quat_convention: Output quaternion convention (default: "wxyz")
+            - action_type: Action type - "endpose" or "joint" (default: "endpose")
 
     Returns:
         Initialized NemoDiT model
     """
+    global _ACTION_TYPE
+
     # Build checkpoint path
     task_name = usr_args.get('task_name', 'default_task')
     ckpt_setting = usr_args.get('ckpt_setting', 'default')
@@ -130,6 +140,10 @@ def get_model(usr_args: Dict[str, Any]) -> NemoDiT:
     ddim_steps = usr_args.get('ddim_steps', 10)
     use_both_arms = usr_args.get('use_both_arms', True)
     quat_convention = usr_args.get('quat_convention', 'wxyz')
+    action_type = usr_args.get('action_type', 'endpose')
+
+    # Set global action type for eval function
+    _ACTION_TYPE = action_type
 
     # Initialize model
     model = NemoDiT(
@@ -140,6 +154,7 @@ def get_model(usr_args: Dict[str, Any]) -> NemoDiT:
         device="cuda:0",
         quat_convention=quat_convention,
         use_both_arms=use_both_arms,
+        action_type=action_type,
     )
 
     return model
@@ -161,13 +176,17 @@ def eval(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
         observation: Initial observation from environment
 
     Control Modes Supported:
-        - "qpos": Joint position control
-        - "ee": End-effector pose control
+        - "qpos": Joint position control (for action_type="joint")
+        - "ee": End-effector pose control (for action_type="endpose")
         - "delta_ee": Delta end-effector control
 
-    For NemoDiT, we use "ee" mode by default as the model outputs
-    end-effector poses (position + quaternion + gripper).
+    The control mode is automatically selected based on the action_type
+    configured during training:
+        - action_type="endpose" -> control_mode="ee"
+        - action_type="joint" -> control_mode="qpos"
     """
+    global _ACTION_TYPE
+
     # Encode initial observation
     obs = encode_obs(observation)
 
@@ -177,14 +196,22 @@ def eval(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
     # Get all actions from the model
     actions = model.get_all_actions(obs)
 
+    # Determine control mode based on action type
+    if _ACTION_TYPE == "joint":
+        control_mode = "qpos"
+    else:  # endpose
+        control_mode = "ee"
+
     # Execute each action
     for action in actions:
-        # Action format for dual arm: (16,) = [left_8d, right_8d]
-        # Each arm: [x, y, z, qw, qx, qy, qz, gripper]
+        # Action format depends on action_type:
+        # - endpose (ee mode): dual arm (16,) = [left_8d, right_8d]
+        #   Each arm: [x, y, z, qw, qx, qy, qz, gripper]
+        # - joint (qpos mode): dual arm (14,) = [left_7d, right_7d]
+        #   Each arm: [j1, j2, j3, j4, j5, j6, gripper]
 
         # Take action in environment
-        # Control mode can be: "qpos", "ee", or "delta_ee"
-        TASK_ENV.take_action(action, control_mode="ee")
+        TASK_ENV.take_action(action, control_mode=control_mode)
 
         # Get new observation
         observation = TASK_ENV.get_obs()

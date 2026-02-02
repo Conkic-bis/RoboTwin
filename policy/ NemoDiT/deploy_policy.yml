@@ -32,12 +32,21 @@ head_camera_type: D435
 # NemoDiT Model Parameters
 # ============================================================================
 
+# Action type: "endpose" or "joint"
+# - endpose: End-effector pose control (xyz + quaternion + gripper)
+#   - Single arm: 10D internal (8D output after rot6d->quat conversion)
+#   - Dual arm: 20D internal (16D output)
+# - joint: Joint position control (6D joint + gripper)
+#   - Single arm: 7D
+#   - Dual arm: 14D
+action_type: endpose
+
 # Observation settings
-n_obs_steps: 1              # Number of observation history steps (currently 1)
+n_obs_steps: 1              # Number of observation history steps
 
 # Action settings
 n_action_steps: 10          # Number of action steps to execute per inference
-                            # Should match future_action_window from training
+                            # Should be <= future_action_window from training
 
 # DDIM sampling settings
 ddim_steps: 10              # Number of DDIM denoising steps
@@ -45,10 +54,10 @@ ddim_steps: 10              # Number of DDIM denoising steps
                             # Higher = slower but more accurate
 
 # Robot configuration
-use_both_arms: true         # Use dual arm mode (20D action space)
-                            # Set to false for single arm (10D action space)
+use_both_arms: true         # Use dual arm mode
+                            # Set to false for single arm
 
-# Quaternion convention for output
+# Quaternion convention for output (only for action_type: endpose)
 quat_convention: wxyz       # Options: wxyz or xyzw
                             # Must match RoboTwin environment expectation
 
@@ -60,7 +69,8 @@ quat_convention: wxyz       # Options: wxyz or xyzw
 # checkpoint_path: null
 
 # Model architecture (these are read from checkpoint by default)
-# model_type: DiT-B
+# model_type: DiT-XL
 # token_size: 2048
 # vision_backbone: resnet50
-# adapter_type: attention_pooling
+# adapter_type: mlp
+# future_action_window: 12
