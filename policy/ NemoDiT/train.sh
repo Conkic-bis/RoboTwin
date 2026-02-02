@@ -35,7 +35,7 @@ vision_backbone="resnet50"    # Vision backbone: resnet18, resnet34, resnet50, v
 adapter_type="mlp"            # Feature adapter: linear, mlp, attention_pooling
 
 # Action configuration
-action_type="endpose"         # Action type: endpose or joint
+action_type="joint"         # Action type: endpose or joint
 use_both_arms="--use_both_arms"  # Use dual arm (comment out for single arm)
 quat_convention="wxyz"        # Quaternion convention in HDF5 data
 
@@ -85,8 +85,8 @@ echo -e "\033[33m[NemoDiT] Action Type: ${action_type}\033[0m"
 echo -e "\033[33m============================================\033[0m"
 
 # Data path
-data_path="../../data/${task_name}-${task_config}-${expert_data_num}"
-
+data_path="../../data/${task_name}/${task_config}-${expert_data_num}"
+# data_path="../../data/${task_name}/${task_config}/data"
 # Checkpoint directory
 checkpoint_dir="checkpoints/${task_name}-${task_config}-${expert_data_num}-${seed}"
 
