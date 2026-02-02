@@ -3,6 +3,9 @@ nemo_dit_model.py
 
 Model wrapper class for NemoDiT policy inference in RoboTwin.
 Provides observation caching and DDIM-based action generation.
+
+Refactored DDIM sampling based on rdt_runner.py style for better
+transparency and control over the denoising process.
 """
 
 import torch
@@ -153,6 +156,69 @@ class NemoDiT:
 
         return images_tensor
 
+    def _ddim_sample(
+        self,
+        vision_condition: torch.Tensor,
+        clip_denoised: bool = True,
+        eta: float = 0.0,
+    ) -> torch.Tensor:
+        """
+        DDIM sampling with explicit step-by-step denoising.
+
+        This method is refactored based on rdt_runner.py's conditional_sample style,
+        providing better transparency and control over the denoising process.
+
+        Args:
+            vision_condition: (batch_size, 1, token_size) vision condition from encoder.
+            clip_denoised: Whether to clip predicted x0 to [-1, 1].
+            eta: DDIM eta parameter (0 for deterministic, >0 for stochastic).
+
+        Returns:
+            action_pred: (batch_size, future_window, action_dim) denoised action sequence.
+        """
+        batch_size = vision_condition.shape[0]
+        action_dim = self.model.in_channels
+        future_window = self.model.future_action_window_size
+        device = vision_condition.device
+
+        # Ensure DDIM diffusion is created
+        if self.model.ddim_diffusion is None:
+            self.model.create_ddim(ddim_step=self.ddim_steps)
+
+        ddim_diffusion = self.model.ddim_diffusion
+
+        # Initialize from random noise
+        noisy_action = torch.randn(
+            batch_size, future_window, action_dim,
+            device=device
+        )
+
+        # Get timestep indices (reversed for denoising: T -> 0)
+        timestep_indices = list(range(ddim_diffusion.num_timesteps))[::-1]
+
+        # Model kwargs for conditional generation
+        model_kwargs = {'z': vision_condition}
+
+        # DDIM sampling loop (step-by-step denoising)
+        for i in timestep_indices:
+            # Create timestep tensor for current batch
+            t = torch.tensor([i] * batch_size, device=device)
+
+            # Single DDIM step: x_t -> x_{t-1}
+            out = ddim_diffusion.ddim_sample(
+                model=self.model.net,
+                x=noisy_action,
+                t=t,
+                clip_denoised=clip_denoised,
+                model_kwargs=model_kwargs,
+                eta=eta,
+            )
+
+            # Update noisy_action for next iteration
+            noisy_action = out["sample"]
+
+        return noisy_action
+
     def _convert_action_to_robotwin(self, action: np.ndarray) -> np.ndarray:
         """
         Convert model output to RoboTwin format.
@@ -222,6 +288,9 @@ class NemoDiT:
         """
         Get action sequence from current observation.
 
+        Uses DDIM sampling with explicit step-by-step denoising
+        (refactored based on rdt_runner.py style).
+
         Args:
             obs: Dictionary containing:
                 - 'images': (num_cameras, 3, H, W) normalized images
@@ -244,25 +313,11 @@ class NemoDiT:
         # Encode vision condition
         vision_condition = self.model.encode_vision_condition(images)
 
-        # Generate action sequence using DDIM
-        # Start from random noise
-        batch_size = images.shape[0]
-        action_dim = self.model.in_channels
-        future_window = self.model.future_action_window_size
-
-        noise = torch.randn(
-            batch_size, future_window, action_dim,
-            device=self.device
-        )
-
-        # DDIM sampling
-        action_pred = self.model.ddim_diffusion.p_sample_loop(
-            model=self.model.net,
-            shape=noise.shape,
-            noise=noise,
+        # DDIM sampling with step-by-step denoising
+        action_pred = self._ddim_sample(
+            vision_condition=vision_condition,
             clip_denoised=True,
-            model_kwargs={'y': vision_condition},
-            progress=False,
+            eta=0.0,
         )
 
         # Convert to numpy
@@ -278,9 +333,13 @@ class NemoDiT:
 
         return [action_converted[0]]
 
+    @torch.no_grad()
     def get_all_actions(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
         """
         Get all predicted actions at once (without queueing).
+
+        Uses DDIM sampling with explicit step-by-step denoising
+        (refactored based on rdt_runner.py style).
 
         Args:
             obs: Dictionary containing images
@@ -297,26 +356,12 @@ class NemoDiT:
         # Encode vision condition
         vision_condition = self.model.encode_vision_condition(images)
 
-        # Generate action sequence using DDIM
-        batch_size = images.shape[0]
-        action_dim = self.model.in_channels
-        future_window = self.model.future_action_window_size
-
-        noise = torch.randn(
-            batch_size, future_window, action_dim,
-            device=self.device
+        # DDIM sampling with step-by-step denoising
+        action_pred = self._ddim_sample(
+            vision_condition=vision_condition,
+            clip_denoised=True,
+            eta=0.0,
         )
-
-        # DDIM sampling
-        with torch.no_grad():
-            action_pred = self.model.ddim_diffusion.p_sample_loop(
-                model=self.model.net,
-                shape=noise.shape,
-                noise=noise,
-                clip_denoised=True,
-                model_kwargs={'y': vision_condition},
-                progress=False,
-            )
 
         # Convert to numpy
         action_pred = action_pred.cpu().numpy()[0]  # (T, action_dim)
