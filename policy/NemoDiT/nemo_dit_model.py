@@ -197,7 +197,7 @@ class NemoDiT:
         timestep_indices = list(range(ddim_diffusion.num_timesteps))[::-1]
 
         # Model kwargs for conditional generation
-        model_kwargs = {'y': vision_condition}
+        model_kwargs = {'z': vision_condition}
 
         # DDIM sampling loop (step-by-step denoising)
         for i in timestep_indices:
