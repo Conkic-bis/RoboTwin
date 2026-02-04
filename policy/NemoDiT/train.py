@@ -1,10 +1,12 @@
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast
 from torchvision import transforms
 from tqdm import tqdm
 import os
 import argparse
+import math
 from pathlib import Path
 
 from model.action_model.action_model import ActionModel
@@ -20,9 +22,9 @@ def parse_args():
                         help='Path to robot dataset directory containing .hdf5 files')
     parser.add_argument('--num_cameras', type=int, default=4,
                         help='Number of camera views (default: 4)')
-    parser.add_argument('--use_both_arms', action='store_true', default=True,
+    parser.add_argument('--use_both_arms', action='store_true', default=False,
                         help='Use both arms data (default: False)')
-    parser.add_argument('--action_type', type=str, default='joint',
+    parser.add_argument('--action_type', type=str, default='endpose',
                         choices=['endpose', 'joint'],
                         help='Action type: endpose (ee pose) or joint (joint angles)')
     parser.add_argument('--quat_convention', type=str, default='wxyz',
@@ -30,20 +32,21 @@ def parse_args():
                         help='Quaternion convention in HDF5 data (default: wxyz, only for endpose)')
 
     # Model arguments
-    parser.add_argument('--model_type', type=str, default='DiT-XL',
+    parser.add_argument('--model_type', type=str, default='DiT-B',
                         choices=['DiT-S', 'DiT-B', 'DiT-L', 'DiT-XL'],
                         help='DiT model size (default: DiT-B)')
-    parser.add_argument('--dropout_prob', type=float, default=0,
+    parser.add_argument('--dropout_prob', type=float, default=0.1,
                         help='Class dropout probability for classifier-free guidance (default: 0.1)')
-    parser.add_argument('--action_dim', type=int, default=7,
+    parser.add_argument('--action_dim', type=int, default=10,
                         help='Action dimension (default: 10 for 3D translation + 6D rot6d + 1D gripper)')
-    parser.add_argument('--future_action_window', type=int, default=12,
+    parser.add_argument('--future_action_window', type=int, default=16,
                         help='Number of future action steps to predict (default: 16)')
     parser.add_argument('--past_action_window', type=int, default=0,
                         help='Number of past action steps as context (default: 0)')
     parser.add_argument('--token_size', type=int, default=2048,
                         help='Token size for conditioning (default: 2048)')
 
+    # Diffusion Policy 时序参数
     # n_obs_steps: 观测步数，用于视觉编码的历史帧数
     # n_obs_steps 的最后一帧对应动作序列的第一帧时刻
     parser.add_argument('--n_obs_steps', type=int, default=2,
@@ -82,8 +85,8 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size per GPU (default: 16)')
 
-    parser.add_argument('--epochs', type=int, default=1000,
-                        help='Number of training epochs (default: 1000)')
+    parser.add_argument('--epochs', type=int, default=500,
+                        help='Number of training epochs (default: 500)')
                         
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate (default: 1e-4)')
@@ -105,10 +108,29 @@ def parse_args():
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers (default: 4)')
 
+    # Mixed Precision Training (AMP)
+    # 使用 FP16 混合精度训练，可显著减少显存占用并加速训练
+    # 在 Ampere 及以上架构 GPU (A100, RTX 30xx, RTX 40xx) 上效果最佳
+    parser.add_argument('--use_amp', action='store_true', default=False,
+                        help='Use Automatic Mixed Precision (FP16) training (default: False)')
+
+    # Learning Rate Warm-up
+    # warmup_epochs: 学习率预热的 epoch 数
+    # 在预热期间，学习率从 0 线性增加到设定的 lr
+    # 有助于训练初期的稳定性，特别是使用大 batch size 或大学习率时
+    parser.add_argument('--warmup_epochs', type=int, default=0,
+                        help='Number of warmup epochs (default: 0, no warmup)')
+    # warmup_type: 预热类型
+    # - 'linear': 线性增加学习率
+    # - 'cosine': 余弦曲线增加学习率
+    parser.add_argument('--warmup_type', type=str, default='linear',
+                        choices=['linear', 'cosine'],
+                        help='Warmup schedule type (default: linear)')
+
     # Checkpoint arguments
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints (default: checkpoints)')
-    parser.add_argument('--save_every', type=int, default=100,
+    parser.add_argument('--save_every', type=int, default=10,
                         help='Save checkpoint every N epochs (default: 10)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
@@ -182,13 +204,46 @@ def create_model(args):
         adapter_type=args.adapter_type,
         class_dropout_prob=args.dropout_prob,
         n_obs_steps=args.n_obs_steps,
+        n_action_steps=args.n_action_steps,
         temporal_agg=args.temporal_agg,
     )
 
     return model
 
 
-def save_checkpoint(model, optimizer, epoch, global_step, args, filename=None):
+def get_warmup_cosine_scheduler(optimizer, warmup_epochs, total_epochs, warmup_type='linear'):
+    """
+    创建带有 warmup 的 cosine annealing 学习率调度器。
+
+    学习率变化:
+    - Warmup 阶段: 从 0 线性/余弦增加到 base_lr
+    - Cosine 阶段: 从 base_lr 余弦衰减到 0
+
+    Args:
+        optimizer: 优化器
+        warmup_epochs: warmup 的 epoch 数
+        total_epochs: 总训练 epoch 数
+        warmup_type: 'linear' 或 'cosine'
+
+    Returns:
+        scheduler: LambdaLR 调度器
+    """
+    def lr_lambda(current_epoch):
+        if current_epoch < warmup_epochs:
+            # Warmup 阶段
+            if warmup_type == 'linear':
+                return (current_epoch + 1) / warmup_epochs
+            else:  # cosine warmup
+                return 0.5 * (1 - math.cos(math.pi * (current_epoch + 1) / warmup_epochs))
+        else:
+            # Cosine annealing 阶段
+            progress = (current_epoch - warmup_epochs) / (total_epochs - warmup_epochs)
+            return 0.5 * (1 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, args, filename=None):
     """Save training checkpoint."""
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -202,10 +257,15 @@ def save_checkpoint(model, optimizer, epoch, global_step, args, filename=None):
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
         'epoch': epoch,
         'global_step': global_step,
         'args': vars(args)
     }
+
+    # 保存 AMP scaler 状态 (如果使用)
+    if scaler is not None:
+        checkpoint['scaler_state_dict'] = scaler.state_dict()
 
     torch.save(checkpoint, checkpoint_path)
     print(f"Checkpoint saved: {checkpoint_path}")
@@ -215,7 +275,7 @@ def save_checkpoint(model, optimizer, epoch, global_step, args, filename=None):
     torch.save(checkpoint, latest_path)
 
 
-def load_checkpoint(model, optimizer, checkpoint_path):
+def load_checkpoint(model, optimizer, scheduler, scaler, checkpoint_path):
     """Load training checkpoint."""
 
     print(f"Loading checkpoint from: {checkpoint_path}")
@@ -223,6 +283,14 @@ def load_checkpoint(model, optimizer, checkpoint_path):
 
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    # 加载 scheduler 状态 (如果存在)
+    if 'scheduler_state_dict' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+    # 加载 AMP scaler 状态 (如果存在且正在使用)
+    if scaler is not None and 'scaler_state_dict' in checkpoint:
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
     epoch = checkpoint['epoch']
     global_step = checkpoint['global_step']
@@ -285,16 +353,30 @@ def train():
         weight_decay=args.weight_decay
     )
 
-    # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs
-    )
+    # Learning rate scheduler (with optional warmup)
+    if args.warmup_epochs > 0:
+        scheduler = get_warmup_cosine_scheduler(
+            optimizer,
+            warmup_epochs=args.warmup_epochs,
+            total_epochs=args.epochs,
+            warmup_type=args.warmup_type
+        )
+        print(f"Using warmup: {args.warmup_epochs} epochs ({args.warmup_type})")
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs
+        )
+
+    # Mixed Precision Training (AMP)
+    scaler = GradScaler() if args.use_amp else None
+    if args.use_amp:
+        print("Using Automatic Mixed Precision (AMP) training")
 
     # Resume from checkpoint if specified
     start_epoch = 0
     global_step = 0
     if args.resume is not None:
-        start_epoch, global_step = load_checkpoint(model, optimizer, args.resume)
+        start_epoch, global_step = load_checkpoint(model, optimizer, scheduler, scaler, args.resume)
 
     # Training loop
     print("Starting training...")
@@ -309,18 +391,34 @@ def train():
             images = batch['images'].to(device)  # (B, num_cameras, 3, H, W)
             actions = batch['actions'].to(device)  # (B, future_window, action_dim)
 
-            # Forward pass: compute loss
-            loss = model.loss(x=actions, images=images)
-
-            # Backward pass
             optimizer.zero_grad()
-            loss.backward()
 
-            # Gradient clipping
-            if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+            if args.use_amp:
+                # Mixed Precision Training
+                with autocast():
+                    loss = model.loss(x=actions, images=images)
 
-            optimizer.step()
+                # Backward pass with gradient scaling
+                scaler.scale(loss).backward()
+
+                # Gradient clipping (unscale first for correct clipping)
+                if args.grad_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard FP32 Training
+                loss = model.loss(x=actions, images=images)
+
+                loss.backward()
+
+                # Gradient clipping
+                if args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+
+                optimizer.step()
 
             # Update metrics
             epoch_loss += loss.item()
@@ -342,11 +440,11 @@ def train():
 
         # Save checkpoint
         if (epoch + 1) % args.save_every == 0:
-            save_checkpoint(model, optimizer, epoch + 1, global_step, args)
+            save_checkpoint(model, optimizer, scheduler, scaler, epoch + 1, global_step, args)
 
     # Save final checkpoint
     print("Training completed!")
-    save_checkpoint(model, optimizer, args.epochs, global_step, args, filename='final.pt')
+    save_checkpoint(model, optimizer, scheduler, scaler, args.epochs, global_step, args, filename='final.pt')
 
 
 if __name__ == '__main__':

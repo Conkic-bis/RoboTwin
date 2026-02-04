@@ -63,6 +63,7 @@ class ActionModel(nn.Module):
                  freeze_vision_backbone=False,
                  class_dropout_prob=0.1,
                  n_obs_steps=1,
+                 n_action_steps=None,
                  temporal_agg='last',
                  ):
         super().__init__()
@@ -70,6 +71,8 @@ class ActionModel(nn.Module):
         self.noise_schedule = noise_schedule
         self.use_vision_condition = use_vision_condition
         self.n_obs_steps = n_obs_steps
+        # n_action_steps: 推理时实际执行的动作步数，默认等于 future_action_window_size
+        self.n_action_steps = n_action_steps if n_action_steps is not None else future_action_window_size
         self.temporal_agg = temporal_agg
 
         # GaussianDiffusion offers forward and backward functions q_sample and p_sample.
@@ -193,3 +196,68 @@ class ActionModel(nn.Module):
                                                learn_sigma=False
                                                )
         return self.ddim_diffusion
+
+    @torch.no_grad()
+    def sample(self, images, ddim_steps=10, use_ddim=True, cfg_scale=1.0, return_all=False):
+        """
+        从观测图像生成动作序列 (推理/采样)。
+
+        推理流程:
+        1. 编码视觉条件: images -> z (B, 1, token_size)
+        2. 从高斯噪声开始，通过 DDIM 采样生成动作序列
+        3. 截取前 n_action_steps 步动作用于执行
+
+        Args:
+            images: (B, n_obs_steps, num_cameras, C, H, W) - 多帧多相机观测
+                   or (B, num_cameras, C, H, W) - 单帧多相机
+            ddim_steps: DDIM 采样步数，越大质量越好但速度越慢 (default: 10)
+            use_ddim: 是否使用 DDIM 加速采样 (default: True)
+            cfg_scale: Classifier-free guidance scale (default: 1.0, 无 guidance)
+            return_all: 是否返回完整的 future_action_window_size 动作 (default: False)
+
+        Returns:
+            actions: (B, n_action_steps, in_channels) - 用于执行的动作序列
+                    如果 return_all=True，返回 (B, future_action_window_size, in_channels)
+        """
+        device = next(self.parameters()).device
+        batch_size = images.shape[0]
+
+        # 1. 编码视觉条件
+        z = self.encode_vision_condition(images)  # (B, 1, token_size)
+
+        # 2. 准备采样器
+        if use_ddim:
+            if self.ddim_diffusion is None or self.ddim_diffusion.num_timesteps != ddim_steps:
+                self.create_ddim(ddim_steps)
+            diffusion = self.ddim_diffusion
+            sample_fn = diffusion.ddim_sample_loop
+        else:
+            diffusion = self.diffusion
+            sample_fn = diffusion.p_sample_loop
+
+        # 3. 定义模型包装器 (用于 CFG)
+        if cfg_scale > 1.0:
+            # Classifier-free guidance: 需要同时计算条件和无条件预测
+            def model_fn(x, t, z):
+                return self.net.forward_with_cfg(x, t, z, cfg_scale)
+        else:
+            # 无 guidance，直接使用模型
+            def model_fn(x, t, z):
+                return self.net(x, t, z)
+
+        # 4. DDIM/DDPM 采样
+        shape = (batch_size, self.future_action_window_size, self.in_channels)
+        actions = sample_fn(
+            model_fn,
+            shape,
+            clip_denoised=False,  # 动作空间不需要 clip 到 [-1, 1]
+            model_kwargs={'z': z},
+            device=device,
+            progress=False,
+        )  # (B, future_action_window_size, in_channels)
+
+        # 5. 截取 n_action_steps 步动作
+        if return_all:
+            return actions
+        else:
+            return actions[:, :self.n_action_steps, :]  # (B, n_action_steps, in_channels)
