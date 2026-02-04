@@ -7,7 +7,8 @@
 #   bash train.sh ${task_name} ${task_config} ${expert_data_num} ${seed} ${gpu_id}
 #
 # Example:
-#   bash train.sh pick_place default 100 0 0
+#   bash train.sh beat_block_hammer default 50 0 0
+#   这会从 data/beat_block_hammer/demo_clean_50/data/ 加载数据
 #
 # Arguments:
 #   task_name       - Name of the task to train on
@@ -85,8 +86,9 @@ echo -e "\033[33m[NemoDiT] Action Type: ${action_type}\033[0m"
 echo -e "\033[33m============================================\033[0m"
 
 # Data path
-data_path="../../data/${task_name}/${task_config}-${expert_data_num}"
-# data_path="../../data/${task_name}/${task_config}/data"
+# 格式: data/{task_name}/demo_clean_{expert_data_num}/data
+# 例如: data/beat_block_hammer/demo_clean_50/data
+data_path="../../data/${task_name}/demo_clean_${expert_data_num}/data"
 # Checkpoint directory
 checkpoint_dir="checkpoints/${task_name}-${task_config}-${expert_data_num}-${seed}"
 
