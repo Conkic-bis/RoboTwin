@@ -211,7 +211,7 @@ def eval(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
         #   Each arm: [j1, j2, j3, j4, j5, j6, gripper]
 
         # Take action in environment
-        TASK_ENV.take_action(action, control_mode=control_mode)
+        TASK_ENV.take_action(action_type, control_mode=control_mode)
 
         # Get new observation
         observation = TASK_ENV.get_obs()

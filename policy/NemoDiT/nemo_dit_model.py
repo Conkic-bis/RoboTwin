@@ -17,7 +17,6 @@ from utils.rotation_utils import convert_endpose_9d_to_7d
 
 class NemoDiT:
 
-
     def __init__(
         self,
         ckpt_file: str,
@@ -29,19 +28,6 @@ class NemoDiT:
         use_both_arms: bool = True,
         action_type: str = "endpose",
     ):
-        """
-        Initialize NemoDiT model.
-
-        Args:
-            ckpt_file: Path to model checkpoint file
-            n_obs_steps: Number of observation steps to cache
-            n_action_steps: Number of action steps to execute per inference
-            ddim_steps: Number of DDIM sampling steps
-            device: Device to run inference on
-            quat_convention: Output quaternion convention ("wxyz" or "xyzw")
-            use_both_arms: Whether to use dual arm mode
-            action_type: Action type - "endpose" or "joint"
-        """
         self.device = device
         self.n_obs_steps = n_obs_steps
         self.n_action_steps = n_action_steps
@@ -70,7 +56,7 @@ class NemoDiT:
         """
         Load model from checkpoint.
 
-        参考 eval.py 的 load_model 函数，使用 checkpoint 中保存的完整训练参数。
+        参考 eval.py 的 load_model 函数，使用 checkpoint 中保存的完整训练参数。0204
         这确保了模型结构与训练时完全一致。
         """
         print(f"Loading checkpoint from: {ckpt_file}")
