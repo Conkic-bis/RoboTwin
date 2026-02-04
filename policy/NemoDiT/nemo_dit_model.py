@@ -72,9 +72,6 @@ class NemoDiT:
         self.model = self._load_model(ckpt_file)
         self.model.eval()
 
-        # Create DDIM sampler
-        self.model.create_ddim(ddim_step=ddim_steps)
-
         # Observation cache
         self.obs_cache: Optional[Dict[str, deque]] = None
         self.action_queue: List[np.ndarray] = []
@@ -88,34 +85,55 @@ class NemoDiT:
             self.single_arm_dim = 7
 
     def _load_model(self, ckpt_file: str) -> ActionModel:
-        """Load model from checkpoint."""
+        """
+        Load model from checkpoint.
+
+        参考 eval.py 的 load_model 函数，使用 checkpoint 中保存的完整训练参数。
+        这确保了模型结构与训练时完全一致。
+        """
         print(f"Loading checkpoint from: {ckpt_file}")
-        checkpoint = torch.load(ckpt_file, map_location=self.device)
+        checkpoint = torch.load(ckpt_file, map_location='cpu')
 
-        # Get model args from checkpoint
-        args = checkpoint.get('args', {})
+        # 获取训练时的参数
+        train_args = checkpoint.get('args', {})
 
-        # Create model with saved args
+        # 打印模型配置信息
+        print(f"Model config: {train_args.get('model_type', 'DiT-B')}, "
+              f"action_dim={train_args.get('action_dim', 'N/A')}")
+        print(f"Temporal config: n_obs_steps={train_args.get('n_obs_steps', 1)}, "
+              f"n_action_steps={train_args.get('n_action_steps', 'N/A')}, "
+              f"future_action_window={train_args.get('future_action_window', 'N/A')}")
+
+        # 使用训练时保存的完整参数创建模型
         model = ActionModel(
-            token_size=args.get('token_size', 2048),
-            model_type=args.get('model_type', 'DiT-B'),
-            in_channels=args.get('action_dim', 20 if self.use_both_arms else 10),
-            future_action_window_size=args.get('future_action_window', 10),
-            past_action_window_size=args.get('past_action_window', 0),
-            diffusion_steps=args.get('diffusion_steps', 100),
-            noise_schedule=args.get('noise_schedule', 'squaredcos_cap_v2'),
+            token_size=train_args.get('token_size', 2048),
+            model_type=train_args.get('model_type', 'DiT-B'),
+            in_channels=train_args.get('action_dim', 20 if self.use_both_arms else 10),
+            future_action_window_size=train_args.get('future_action_window', 10),
+            past_action_window_size=train_args.get('past_action_window', 0),
+            diffusion_steps=train_args.get('diffusion_steps', 100),
+            noise_schedule=train_args.get('noise_schedule', 'squaredcos_cap_v2'),
             use_vision_condition=True,
-            vision_backbone_type=args.get('vision_backbone', 'resnet50'),
-            vision_pretrained=args.get('vision_pretrained', True),
-            num_cameras=args.get('num_cameras', 4),
-            freeze_vision_backbone=args.get('freeze_vision', False),
-            adapter_type=args.get('adapter_type', 'attention_pooling'),
+            vision_backbone_type=train_args.get('vision_backbone', 'resnet50'),
+            vision_pretrained=False,  # 不需要预训练权重，我们会加载训练好的
+            num_cameras=train_args.get('num_cameras', 4),
+            freeze_vision_backbone=False,
+            adapter_type=train_args.get('adapter_type', 'mlp'),
+            class_dropout_prob=0.0,  # 推理时关闭 dropout
+            n_obs_steps=train_args.get('n_obs_steps', 1),
+            n_action_steps=train_args.get('n_action_steps', self.n_action_steps),
+            temporal_agg=train_args.get('temporal_agg', 'last'),
         )
 
+        # 加载权重
         model.load_state_dict(checkpoint['model_state_dict'])
         model = model.to(self.device)
 
-        print(f"Model loaded successfully. Epoch: {checkpoint.get('epoch', 'N/A')}")
+        # 更新实例变量以匹配训练配置
+        self.n_obs_steps = train_args.get('n_obs_steps', self.n_obs_steps)
+        self.n_action_steps = train_args.get('n_action_steps', self.n_action_steps)
+
+        print(f"Model loaded from epoch {checkpoint.get('epoch', 'N/A')}")
         return model
 
     def reset_obs(self):
@@ -155,69 +173,6 @@ class NemoDiT:
         images_tensor = torch.from_numpy(images).float().to(self.device)
 
         return images_tensor
-
-    def _ddim_sample(
-        self,
-        vision_condition: torch.Tensor,
-        clip_denoised: bool = True,
-        eta: float = 0.0,
-    ) -> torch.Tensor:
-        """
-        DDIM sampling with explicit step-by-step denoising.
-
-        This method is refactored based on rdt_runner.py's conditional_sample style,
-        providing better transparency and control over the denoising process.
-
-        Args:
-            vision_condition: (batch_size, 1, token_size) vision condition from encoder.
-            clip_denoised: Whether to clip predicted x0 to [-1, 1].
-            eta: DDIM eta parameter (0 for deterministic, >0 for stochastic).
-
-        Returns:
-            action_pred: (batch_size, future_window, action_dim) denoised action sequence.
-        """
-        batch_size = vision_condition.shape[0]
-        action_dim = self.model.in_channels
-        future_window = self.model.future_action_window_size
-        device = vision_condition.device
-
-        # Ensure DDIM diffusion is created
-        if self.model.ddim_diffusion is None:
-            self.model.create_ddim(ddim_step=self.ddim_steps)
-
-        ddim_diffusion = self.model.ddim_diffusion
-
-        # Initialize from random noise
-        noisy_action = torch.randn(
-            batch_size, future_window, action_dim,
-            device=device
-        )
-
-        # Get timestep indices (reversed for denoising: T -> 0)
-        timestep_indices = list(range(ddim_diffusion.num_timesteps))[::-1]
-
-        # Model kwargs for conditional generation
-        model_kwargs = {'z': vision_condition}
-
-        # DDIM sampling loop (step-by-step denoising)
-        for i in timestep_indices:
-            # Create timestep tensor for current batch
-            t = torch.tensor([i] * batch_size, device=device)
-
-            # Single DDIM step: x_t -> x_{t-1}
-            out = ddim_diffusion.ddim_sample(
-                model=self.model.net,
-                x=noisy_action,
-                t=t,
-                clip_denoised=clip_denoised,
-                model_kwargs=model_kwargs,
-                eta=eta,
-            )
-
-            # Update noisy_action for next iteration
-            noisy_action = out["sample"]
-
-        return noisy_action
 
     def _convert_action_to_robotwin(self, action: np.ndarray) -> np.ndarray:
         """
@@ -288,8 +243,7 @@ class NemoDiT:
         """
         Get action sequence from current observation.
 
-        Uses DDIM sampling with explicit step-by-step denoising
-        (refactored based on rdt_runner.py style).
+        使用 model.sample() 方法进行推理，与 eval.py 保持一致。
 
         Args:
             obs: Dictionary containing:
@@ -307,21 +261,19 @@ class NemoDiT:
             action = self.action_queue.pop(0)
             return [action]
 
-        # Prepare input
+        # Prepare input: (1, n_obs_steps, num_cameras, C, H, W)
         images = self._prepare_vision_input()
 
-        # Encode vision condition
-        vision_condition = self.model.encode_vision_condition(images)
-
-        # DDIM sampling with step-by-step denoising
-        action_pred = self._ddim_sample(
-            vision_condition=vision_condition,
-            clip_denoised=True,
-            eta=0.0,
-        )
+        # 使用 model.sample() 进行推理，与 eval.py 一致
+        action_pred = self.model.sample(
+            images,
+            ddim_steps=self.ddim_steps,
+            cfg_scale=1.0,  # 无 classifier-free guidance
+            return_all=False  # 只返回 n_action_steps 步
+        )  # (1, n_action_steps, action_dim)
 
         # Convert to numpy
-        action_pred = action_pred.cpu().numpy()[0]  # (T, action_dim)
+        action_pred = action_pred.cpu().numpy()[0]  # (n_action_steps, action_dim)
 
         # Convert to RoboTwin format
         action_converted = self._convert_action_to_robotwin(action_pred)
@@ -338,8 +290,7 @@ class NemoDiT:
         """
         Get all predicted actions at once (without queueing).
 
-        Uses DDIM sampling with explicit step-by-step denoising
-        (refactored based on rdt_runner.py style).
+        使用 model.sample() 方法进行推理，与 eval.py 保持一致。
 
         Args:
             obs: Dictionary containing images
@@ -350,18 +301,16 @@ class NemoDiT:
         # Update observation cache
         self.update_obs(obs)
 
-        # Prepare input
+        # Prepare input: (1, n_obs_steps, num_cameras, C, H, W)
         images = self._prepare_vision_input()
 
-        # Encode vision condition
-        vision_condition = self.model.encode_vision_condition(images)
-
-        # DDIM sampling with step-by-step denoising
-        action_pred = self._ddim_sample(
-            vision_condition=vision_condition,
-            clip_denoised=True,
-            eta=0.0,
-        )
+        # 使用 model.sample() 进行推理，返回完整的 future_action_window
+        action_pred = self.model.sample(
+            images,
+            ddim_steps=self.ddim_steps,
+            cfg_scale=1.0,  # 无 classifier-free guidance
+            return_all=True  # 返回完整的 future_action_window_size 步
+        )  # (1, future_action_window_size, action_dim)
 
         # Convert to numpy
         action_pred = action_pred.cpu().numpy()[0]  # (T, action_dim)
