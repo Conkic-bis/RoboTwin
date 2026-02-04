@@ -1,13 +1,3 @@
-"""
-nemo_dit_model.py
-
-Model wrapper class for NemoDiT policy inference in RoboTwin.
-Provides observation caching and DDIM-based action generation.
-
-Refactored DDIM sampling based on rdt_runner.py style for better
-transparency and control over the denoising process.
-"""
-
 import torch
 import numpy as np
 from typing import Dict, List, Optional, Any
@@ -17,7 +7,7 @@ import sys
 from pathlib import Path
 
 # Add parent directory to path for imports
-parent_dir = str(Path(__file__).parent.parent)
+parent_dir = str(Path(__file__).parent)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
@@ -26,15 +16,7 @@ from utils.rotation_utils import convert_endpose_9d_to_7d
 
 
 class NemoDiT:
-    """
-    NemoDiT model wrapper for RoboTwin policy deployment.
 
-    This class wraps the ActionModel and provides:
-    - Checkpoint loading
-    - Observation caching for temporal context
-    - DDIM-based action generation
-    - Action format conversion (rot6d -> quaternion)
-    """
 
     def __init__(
         self,
