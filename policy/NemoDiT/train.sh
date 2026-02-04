@@ -31,7 +31,7 @@ gpu_id=${5}
 # ============================================================================
 
 # Model configuration
-model_type="DiT-XL"           # Model size: DiT-S, DiT-B, DiT-L, DiT-XL
+model_type="DiT-B"           # Model size: DiT-S, DiT-B, DiT-L, DiT-XL
 vision_backbone="resnet50"    # Vision backbone: resnet18, resnet34, resnet50, vit_b_16, vit_b_32
 adapter_type="mlp"            # Feature adapter: linear, mlp, attention_pooling
 
@@ -45,7 +45,7 @@ n_obs_steps=2                 # Number of observation history steps
 n_action_steps=8              # Number of action steps to execute per inference
 future_action_window=12       # Number of future action steps to predict
 past_action_window=0          # Number of past action steps as context
-temporal_agg="last"           # Temporal aggregation: last, mean, concat
+temporal_agg="concat"           # Temporal aggregation: last, mean, concat
 
 # Diffusion configuration
 diffusion_steps=100           # Number of diffusion steps
@@ -53,13 +53,13 @@ noise_schedule="squaredcos_cap_v2"  # Noise schedule type
 ddim_steps=10                 # DDIM sampling steps (for inference)
 
 # Training configuration
-epochs=1000                   # Number of training epochs
-batch_size=16                 # Batch size per GPU
+epochs=500                   # Number of training epochs
+batch_size=32                 # Batch size per GPU
 lr=1e-4                       # Learning rate
 weight_decay=0.01             # Weight decay for L2 regularization
 grad_clip=1.0                 # Gradient clipping max norm
 num_workers=4                 # Number of data loading workers
-save_every=100                # Save checkpoint every N epochs
+save_every=50                # Save checkpoint every N epochs
 
 # Camera configuration
 num_cameras=4                 # Number of camera views

@@ -22,9 +22,9 @@ def parse_args():
                         help='Path to robot dataset directory containing .hdf5 files')
     parser.add_argument('--num_cameras', type=int, default=4,
                         help='Number of camera views (default: 4)')
-    parser.add_argument('--use_both_arms', action='store_true', default=False,
+    parser.add_argument('--use_both_arms', action='store_true', default=True,
                         help='Use both arms data (default: False)')
-    parser.add_argument('--action_type', type=str, default='endpose',
+    parser.add_argument('--action_type', type=str, default='joint',
                         choices=['endpose', 'joint'],
                         help='Action type: endpose (ee pose) or joint (joint angles)')
     parser.add_argument('--quat_convention', type=str, default='wxyz',
@@ -37,9 +37,9 @@ def parse_args():
                         help='DiT model size (default: DiT-B)')
     parser.add_argument('--dropout_prob', type=float, default=0.1,
                         help='Class dropout probability for classifier-free guidance (default: 0.1)')
-    parser.add_argument('--action_dim', type=int, default=10,
+    parser.add_argument('--action_dim', type=int, default=7,
                         help='Action dimension (default: 10 for 3D translation + 6D rot6d + 1D gripper)')
-    parser.add_argument('--future_action_window', type=int, default=16,
+    parser.add_argument('--future_action_window', type=int, default=12,
                         help='Number of future action steps to predict (default: 16)')
     parser.add_argument('--past_action_window', type=int, default=0,
                         help='Number of past action steps as context (default: 0)')
@@ -59,9 +59,9 @@ def parse_args():
     # - 'last': 只使用最后一帧观测
     # - 'mean': 对所有观测帧取平均
     # - 'concat': 拼接所有帧特征后投影
-    parser.add_argument('--temporal_agg', type=str, default='last',
+    parser.add_argument('--temporal_agg', type=str, default='concat',
                         choices=['last', 'mean', 'concat'],
-                        help='Temporal aggregation method for multi-frame observations (default: last)')
+                        help='Temporal aggregation method for multi-frame observations (default: concat)')
 
     # Vision arguments
     parser.add_argument('--vision_backbone', type=str, default='resnet50',

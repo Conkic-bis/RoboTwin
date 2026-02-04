@@ -39,17 +39,17 @@ head_camera_type: D435
 # - joint: Joint position control (6D joint + gripper)
 #   - Single arm: 7D
 #   - Dual arm: 14D
-action_type: endpose
+action_type: joint
 
 # Observation settings
-n_obs_steps: 1              # Number of observation history steps
+n_obs_steps: 2              # Number of observation history steps
 
 # Action settings
-n_action_steps: 10          # Number of action steps to execute per inference
+n_action_steps: 8          # Number of action steps to execute per inference
                             # Should be <= future_action_window from training
 
 # DDIM sampling settings
-ddim_steps: 10              # Number of DDIM denoising steps
+ddim_steps: 100              # Number of DDIM denoising steps
                             # Lower = faster but less accurate
                             # Higher = slower but more accurate
 
