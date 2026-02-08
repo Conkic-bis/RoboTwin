@@ -72,12 +72,13 @@ def encode_obs(observation: Dict[str, Any]) -> Dict[str, np.ndarray]:
         img = (img - IMAGENET_MEAN.reshape(3, 1, 1)) / IMAGENET_STD.reshape(3, 1, 1)
         return img
 
-    # Stack all cameras: (4, 3, H, W)
+    # Stack all cameras in the same order as training dataloader:
+    # ['front_camera', 'head_camera', 'left_camera', 'right_camera']
     images = np.stack([
+        process_image(front_cam),
         process_image(head_cam),
         process_image(left_cam),
         process_image(right_cam),
-        process_image(front_cam),
     ], axis=0).astype(np.float32)
 
     # Build observation dictionary
