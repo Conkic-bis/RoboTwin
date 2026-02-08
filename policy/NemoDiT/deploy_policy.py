@@ -202,23 +202,10 @@ def eval(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
     else:  # endpose
         control_mode = "ee"
 
-    # Execute each action
+    # Execute each action (open-loop: no re-planning within this batch)
     for action in actions:
-        # Action format depends on action_type:
-        # - endpose (ee mode): dual arm (16,) = [left_8d, right_8d]
-        #   Each arm: [x, y, z, qw, qx, qy, qz, gripper]
-        # - joint (qpos mode): dual arm (14,) = [left_7d, right_7d]
-        #   Each arm: [j1, j2, j3, j4, j5, j6, gripper]
-
         # Take action in environment
         TASK_ENV.take_action(action, control_mode=control_mode)
-
-        # Get new observation
-        observation = TASK_ENV.get_obs()
-
-        # Update model with new observation
-        obs = encode_obs(observation)
-        model.update_obs(obs)
 
 
 def reset_model(model: NemoDiT):

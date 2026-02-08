@@ -113,18 +113,24 @@ class NemoDiT:
         """
         Update observation cache with new observation.
 
+        When the cache is empty (e.g. first call after reset), the observation
+        is duplicated to fill the entire n_obs_steps window so that
+        _prepare_vision_input always produces the shape the model expects.
+
         Args:
             obs: Dictionary containing:
                 - 'images': (num_cameras, 3, H, W) normalized images
                 - 'agent_pos': (action_dim,) current joint/ee positions (optional)
         """
         if self.obs_cache is None:
-            # Initialize cache
+            # Initialize cache and pad with the first observation
             self.obs_cache = {
                 'images': deque(maxlen=self.n_obs_steps),
             }
-
-        self.obs_cache['images'].append(obs['images'])
+            for _ in range(self.n_obs_steps):
+                self.obs_cache['images'].append(obs['images'])
+        else:
+            self.obs_cache['images'].append(obs['images'])
 
     def _prepare_vision_input(self) -> torch.Tensor:
         """Prepare vision input from observation cache."""
