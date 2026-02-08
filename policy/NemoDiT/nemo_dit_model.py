@@ -131,11 +131,13 @@ class NemoDiT:
         if self.obs_cache is None or len(self.obs_cache['images']) == 0:
             raise ValueError("No observations in cache. Call update_obs first.")
 
-        # Use the latest observation
-        images = self.obs_cache['images'][-1]  # (num_cameras, 3, H, W)
+        # Stack all cached observations along a temporal dimension
+        # Each element in the deque is (num_cameras, 3, H, W)
+        images_list = list(self.obs_cache['images'])  # list of (num_cameras, 3, H, W)
+        images = np.stack(images_list, axis=0)  # (n_obs_steps, num_cameras, 3, H, W)
 
         # Add batch dimension
-        images = np.expand_dims(images, axis=0)  # (1, num_cameras, 3, H, W)
+        images = np.expand_dims(images, axis=0)  # (1, n_obs_steps, num_cameras, 3, H, W)
 
         # Convert to tensor
         images_tensor = torch.from_numpy(images).float().to(self.device)
@@ -272,13 +274,13 @@ class NemoDiT:
         # Prepare input: (1, n_obs_steps, num_cameras, C, H, W)
         images = self._prepare_vision_input()
 
-        # 使用 model.sample() 进行推理，返回完整的 future_action_window
+        # 使用 model.sample() 进行推理，截取 n_action_steps 步用于执行
         action_pred = self.model.sample(
             images,
             ddim_steps=self.ddim_steps,
             cfg_scale=1.0,  # 无 classifier-free guidance
-            return_all=True  # 返回完整的 future_action_window_size 步
-        )  # (1, future_action_window_size, action_dim)
+            return_all=False  # 只返回 n_action_steps 步
+        )  # (1, n_action_steps, action_dim)
 
         # Convert to numpy
         action_pred = action_pred.cpu().numpy()[0]  # (T, action_dim)
