@@ -196,16 +196,15 @@ def eval(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
     # Get all actions from the model
     actions = model.get_all_actions(obs)
 
-    # Determine control mode based on action type
+    # Map policy action_type to environment action_type parameter
     if _ACTION_TYPE == "joint":
-        control_mode = "qpos"
+        env_action_type = "qpos"
     else:  # endpose
-        control_mode = "ee"
+        env_action_type = "ee"
 
     # Execute each action (open-loop: no re-planning within this batch)
     for action in actions:
-        # Take action in environment
-        TASK_ENV.take_action(action, control_mode=control_mode)
+        TASK_ENV.take_action(action, action_type=env_action_type)
 
 
 def reset_model(model: NemoDiT):
