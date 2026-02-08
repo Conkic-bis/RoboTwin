@@ -52,7 +52,8 @@ def rotation_matrix_to_rot6d(rotation_matrix: np.ndarray) -> np.ndarray:
     """
     Convert rotation matrix to 6D rotation representation (rot6d).
 
-    Takes the first two columns of the rotation matrix.
+    Takes the first two columns of the rotation matrix and concatenates them
+    column-wise: [col0, col1] = [r00, r10, r20, r01, r11, r21].
 
     Args:
         rotation_matrix: Rotation matrix of shape (..., 3, 3)
@@ -61,8 +62,10 @@ def rotation_matrix_to_rot6d(rotation_matrix: np.ndarray) -> np.ndarray:
         rot6d representation of shape (..., 6)
     """
     rotation_matrix = np.asarray(rotation_matrix)
-    # Take first two columns and flatten
-    rot6d = rotation_matrix[..., :, :2].reshape(*rotation_matrix.shape[:-2], 6)
+    # Extract first two columns and concatenate column-wise
+    col0 = rotation_matrix[..., :, 0]  # (..., 3)
+    col1 = rotation_matrix[..., :, 1]  # (..., 3)
+    rot6d = np.concatenate([col0, col1], axis=-1)  # (..., 6)
     return rot6d
 
 

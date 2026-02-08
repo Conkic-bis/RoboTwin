@@ -72,12 +72,13 @@ def encode_obs(observation: Dict[str, Any]) -> Dict[str, np.ndarray]:
         img = (img - IMAGENET_MEAN.reshape(3, 1, 1)) / IMAGENET_STD.reshape(3, 1, 1)
         return img
 
-    # Stack all cameras: (4, 3, H, W)
+    # Stack all cameras in the same order as training dataloader:
+    # ['front_camera', 'head_camera', 'left_camera', 'right_camera']
     images = np.stack([
+        process_image(front_cam),
         process_image(head_cam),
         process_image(left_cam),
         process_image(right_cam),
-        process_image(front_cam),
     ], axis=0).astype(np.float32)
 
     # Build observation dictionary
@@ -196,29 +197,15 @@ def eval(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
     # Get all actions from the model
     actions = model.get_all_actions(obs)
 
-    # Determine control mode based on action type
+    # Map policy action_type to environment action_type parameter
     if _ACTION_TYPE == "joint":
-        control_mode = "qpos"
+        env_action_type = "qpos"
     else:  # endpose
-        control_mode = "ee"
+        env_action_type = "ee"
 
-    # Execute each action
+    # Execute each action (open-loop: no re-planning within this batch)
     for action in actions:
-        # Action format depends on action_type:
-        # - endpose (ee mode): dual arm (16,) = [left_8d, right_8d]
-        #   Each arm: [x, y, z, qw, qx, qy, qz, gripper]
-        # - joint (qpos mode): dual arm (14,) = [left_7d, right_7d]
-        #   Each arm: [j1, j2, j3, j4, j5, j6, gripper]
-
-        # Take action in environment
-        TASK_ENV.take_action(action_type, control_mode=control_mode)
-
-        # Get new observation
-        observation = TASK_ENV.get_obs()
-
-        # Update model with new observation
-        obs = encode_obs(observation)
-        model.update_obs(obs)
+        TASK_ENV.take_action(action, action_type=env_action_type)
 
 
 def reset_model(model: NemoDiT):

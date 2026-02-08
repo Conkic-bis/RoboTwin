@@ -113,29 +113,37 @@ class NemoDiT:
         """
         Update observation cache with new observation.
 
+        When the cache is empty (e.g. first call after reset), the observation
+        is duplicated to fill the entire n_obs_steps window so that
+        _prepare_vision_input always produces the shape the model expects.
+
         Args:
             obs: Dictionary containing:
                 - 'images': (num_cameras, 3, H, W) normalized images
                 - 'agent_pos': (action_dim,) current joint/ee positions (optional)
         """
         if self.obs_cache is None:
-            # Initialize cache
+            # Initialize cache and pad with the first observation
             self.obs_cache = {
                 'images': deque(maxlen=self.n_obs_steps),
             }
-
-        self.obs_cache['images'].append(obs['images'])
+            for _ in range(self.n_obs_steps):
+                self.obs_cache['images'].append(obs['images'])
+        else:
+            self.obs_cache['images'].append(obs['images'])
 
     def _prepare_vision_input(self) -> torch.Tensor:
         """Prepare vision input from observation cache."""
         if self.obs_cache is None or len(self.obs_cache['images']) == 0:
             raise ValueError("No observations in cache. Call update_obs first.")
 
-        # Use the latest observation
-        images = self.obs_cache['images'][-1]  # (num_cameras, 3, H, W)
+        # Stack all cached observations along a temporal dimension
+        # Each element in the deque is (num_cameras, 3, H, W)
+        images_list = list(self.obs_cache['images'])  # list of (num_cameras, 3, H, W)
+        images = np.stack(images_list, axis=0)  # (n_obs_steps, num_cameras, 3, H, W)
 
         # Add batch dimension
-        images = np.expand_dims(images, axis=0)  # (1, num_cameras, 3, H, W)
+        images = np.expand_dims(images, axis=0)  # (1, n_obs_steps, num_cameras, 3, H, W)
 
         # Convert to tensor
         images_tensor = torch.from_numpy(images).float().to(self.device)
@@ -146,14 +154,16 @@ class NemoDiT:
         """
         Convert model output to RoboTwin format.
 
+        take_action() always expects dual-arm layout:
+            [left_arm, left_gripper, right_arm, right_gripper]
+
         For endpose action_type:
-            - Converts rot6d to quaternion
-            - Input: Single arm (T, 10) [x,y,z, r1-r6, gripper], Dual arm (T, 20)
-            - Output: Single arm (T, 8) [x,y,z, qw,qx,qy,qz, gripper], Dual arm (T, 16)
+            - Converts rot6d to quaternion per arm
+            - Dual arm input (T, 20) → output (T, 16)
 
         For joint action_type:
-            - No conversion needed, pass through directly
-            - Input/Output: Single arm (T, 7) [j1-j6, gripper], Dual arm (T, 14)
+            - No rotation conversion needed
+            - Dual arm input (T, 14) → output (T, 14)
 
         Args:
             action: (T, action_dim) action sequence
@@ -161,26 +171,27 @@ class NemoDiT:
         Returns:
             Converted action in RoboTwin format
         """
-        # For joint action type, no conversion needed
         if self.action_type == "joint":
-            return action
-
-        # For endpose action type, convert rot6d to quaternion
-        T = action.shape[0]
-
-        if self.use_both_arms:
-            # Split into left and right arm
-            left_action = action[:, :10]  # (T, 10)
-            right_action = action[:, 10:20]  # (T, 10)
-
-            # Convert each arm
-            left_converted = self._convert_single_arm_action(left_action)
-            right_converted = self._convert_single_arm_action(right_action)
-
-            # Combine
-            return np.concatenate([left_converted, right_converted], axis=-1)
+            if self.use_both_arms:
+                # (T, 14) = [left_joints(6), left_gripper(1),
+                #             right_joints(6), right_gripper(1)]
+                left_action = action[:, :7]    # (T, 7)
+                right_action = action[:, 7:14] # (T, 7)
+                return np.concatenate([left_action, right_action], axis=-1)
+            else:
+                # Single arm (T, 7) = [joints(6), gripper(1)]
+                return action
         else:
-            return self._convert_single_arm_action(action)
+            # endpose: need rot6d → quaternion conversion
+            if self.use_both_arms:
+                # (T, 20) = [left(10), right(10)]
+                left_action = action[:, :10]
+                right_action = action[:, 10:20]
+                left_converted = self._convert_single_arm_action(left_action)
+                right_converted = self._convert_single_arm_action(right_action)
+                return np.concatenate([left_converted, right_converted], axis=-1)
+            else:
+                return self._convert_single_arm_action(action)
 
     def _convert_single_arm_action(self, action: np.ndarray) -> np.ndarray:
         """
@@ -272,13 +283,13 @@ class NemoDiT:
         # Prepare input: (1, n_obs_steps, num_cameras, C, H, W)
         images = self._prepare_vision_input()
 
-        # 使用 model.sample() 进行推理，返回完整的 future_action_window
+        # 使用 model.sample() 进行推理，截取 n_action_steps 步用于执行
         action_pred = self.model.sample(
             images,
             ddim_steps=self.ddim_steps,
             cfg_scale=1.0,  # 无 classifier-free guidance
-            return_all=True  # 返回完整的 future_action_window_size 步
-        )  # (1, future_action_window_size, action_dim)
+            return_all=False  # 只返回 n_action_steps 步
+        )  # (1, n_action_steps, action_dim)
 
         # Convert to numpy
         action_pred = action_pred.cpu().numpy()[0]  # (T, action_dim)
