@@ -94,7 +94,7 @@ class NemoDiT:
         )
 
         # 加载权重
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model = model.to(self.device)
 
         # 更新实例变量以匹配训练配置

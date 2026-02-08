@@ -205,7 +205,7 @@ def eval(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
 
     # Execute each action (open-loop: no re-planning within this batch)
     for action in actions:
-        TASK_ENV.take_action(action, action_type=env_action_type)
+        TASK_ENV.take_action(action, action_type=control_mode)
 
 
 def reset_model(model: NemoDiT):
