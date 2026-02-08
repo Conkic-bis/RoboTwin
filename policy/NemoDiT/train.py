@@ -76,7 +76,7 @@ def parse_args():
                         help='Feature adapter type')
 
     # Diffusion arguments
-    parser.add_argument('--diffusion_steps', type=int, default=100,
+    parser.add_argument('--diffusion_steps', type=int, default=500,
                         help='Number of diffusion steps (default: 100)')
     parser.add_argument('--noise_schedule', type=str, default='squaredcos_cap_v2',
                         help='Noise schedule type (default: squaredcos_cap_v2)')
