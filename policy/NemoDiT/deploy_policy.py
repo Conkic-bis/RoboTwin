@@ -199,9 +199,9 @@ def eval(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
 
     # Map policy action_type to environment action_type parameter
     if _ACTION_TYPE == "joint":
-        env_action_type = "qpos"
+        control_mode = "qpos"
     else:  # endpose
-        env_action_type = "ee"
+        control_mode = "ee"
 
     # Execute each action (open-loop: no re-planning within this batch)
     for action in actions:
