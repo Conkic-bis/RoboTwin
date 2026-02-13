@@ -228,35 +228,62 @@ def reset_model(model: NemoDiT):
 
 def eval_with_action_queue(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
     """
-    Alternative evaluation loop using action queueing.
+    Real-time inference evaluation loop.
 
-    Instead of executing all predicted actions at once, this version:
-    1. Predicts a sequence of actions
-    2. Executes them one by one from the queue
-    3. Only re-predicts when the queue is empty
+    At every step this function:
+    1. Runs a full model inference to obtain n_action_steps actions
+       (the model still outputs future_action_window_size internally and
+       selects the first n_action_steps)
+    2. Computes the mean across all n_action_steps
+    3. Blends the mean with the current robot state:
+           action = (mean_of_predicted_actions + current_state) / 2
+    4. Executes only this single blended action
+    5. Re-observes and repeats
 
-    This can be more responsive to environment changes.
+    This provides smooth, closed-loop control that continuously
+    incorporates fresh observations.
     """
+    global _ACTION_TYPE
+
     obs = encode_obs(observation)
     instruction = TASK_ENV.get_instruction()
+
+    # Determine control mode from action type
+    if _ACTION_TYPE == "joint":
+        control_mode = "qpos"
+    else:
+        control_mode = "ee"
 
     max_steps = 1000  # Maximum steps per episode
 
     for step in range(max_steps):
-        # Get single action (model handles queueing internally)
-        actions = model.get_action(obs)
-        action = actions[0]
+        # --- Full model inference every step (real-time) ---
+        # get_all_actions: updates obs cache, runs diffusion sampling,
+        # returns (n_action_steps, action_dim) in RoboTwin format
+        all_actions = model.get_all_actions(obs)  # (n_action_steps, action_dim)
 
-        # Execute action
-        TASK_ENV.take_action(action, control_mode="ee")
+        # Compute the mean across all predicted action steps
+        mean_action = np.mean(all_actions, axis=0)  # (action_dim,)
 
-        # Check if done
+        # Read current robot state from the observation
+        current_state = obs["agent_pos"]  # (action_dim,)
+
+        # Blend: single inference frame = (mean_predicted + current_state) / 2
+        blended_action = (mean_action + current_state) / 2.0
+
+        # Execute the single blended action
+        TASK_ENV.take_action(blended_action, action_type=control_mode)
+
+        # Get new observation
         observation = TASK_ENV.get_obs()
         if TASK_ENV.is_done():
             break
 
-        # Update observation
+        # Re-encode for next iteration (fresh obs every step)
         obs = encode_obs(observation)
+
+        # Reset model obs cache so next inference uses only the latest frame
+        model.reset_obs()
 
 
 # ============================================================================
