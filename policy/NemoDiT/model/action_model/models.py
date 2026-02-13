@@ -116,6 +116,20 @@ class HistoryEmbedder(nn.Module):
         x = self.linear(x)
         return x
 
+class StateEmbedder(nn.Module):
+    """
+    Embeds the robot's current state (action at frame 0) into hidden representations.
+    State is the last frame of n_obs_steps = frame 0 of action sequence.
+    It is provided as clean (no noise) conditioning to the model.
+    """
+    def __init__(self, state_size, hidden_size):
+        super().__init__()
+        self.linear = nn.Linear(state_size, hidden_size)
+
+    def forward(self, x):
+        x = self.linear(x)
+        return x
+
 #################################################################################
 #                                 Core DiT Model                                #
 #################################################################################
@@ -157,6 +171,16 @@ class FinalLayer(nn.Module):
 class DiT(nn.Module):
     """
     Diffusion model with a Transformer backbone.
+
+    支持 state 条件输入:
+        state 是机器人当前状态 (n_obs_steps 最后一帧 = action 第0帧)，
+        作为无噪音的条件 token 参与 transformer 计算。
+
+        序列结构: [condition(t+z), state, noisy_action_1, ..., noisy_action_{T-1}]
+        - condition: timestep + vision condition (1 token)
+        - state: 机器人当前状态，无噪音 (1 token)
+        - noisy actions: 需要去噪的未来动作序列 (T-1 tokens)
+        总长度 = 1 + 1 + (T-1) = T+1，与原来的位置编码大小一致
     """
     def __init__(
         self,
@@ -182,17 +206,20 @@ class DiT(nn.Module):
         self.num_heads = num_heads
         self.past_action_window_size = past_action_window_size
         self.future_action_window_size = future_action_window_size
-        
+
         # Action history is not used now.
         self.history_embedder = HistoryEmbedder(action_size=in_channels, hidden_size=hidden_size)
-        
+
         self.x_embedder = ActionEmbedder(action_size=in_channels, hidden_size=hidden_size)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.z_embedder = LabelEmbedder(in_size=token_size, hidden_size=hidden_size, dropout_prob=class_dropout_prob, conditions_shape=(1, 1, token_size))
+        # State embedder: 将机器人当前状态嵌入为条件 token
+        self.state_embedder = StateEmbedder(state_size=in_channels, hidden_size=hidden_size)
         scale = hidden_size ** -0.5
 
         # Learnable positional embeddings
-        # +1 for the conditional token (t + z combined)
+        # 序列: [condition, state, action_1, ..., action_{T-1}]
+        # 总长度 = 1 + 1 + (future_action_window_size - 1) = future_action_window_size + 1
         self.positional_embedding = nn.Parameter(
                 scale * torch.randn(future_action_window_size + past_action_window_size + 1, hidden_size))
 
@@ -218,6 +245,10 @@ class DiT(nn.Module):
         nn.init.normal_(self.history_embedder.linear.weight, std=0.02)
         nn.init.constant_(self.history_embedder.linear.bias, 0)
 
+        # Initialize state embedder
+        nn.init.normal_(self.state_embedder.linear.weight, std=0.02)
+        nn.init.constant_(self.state_embedder.linear.bias, 0)
+
         # Initialize label embedding table:
         if self.class_dropout_prob > 0:
             nn.init.normal_(self.z_embedder.uncondition, std=0.02)
@@ -231,40 +262,55 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    def forward(self, x, t, z):
+    def forward(self, x, t, z, state=None):
         """
         Forward pass of DiT.
 
         Args:
             x: (N, T, in_channels) - noisy action sequence to denoise
-               T = future_action_window_size
+               T = future_action_window_size - 1 (state 不参与去噪)
             t: (N,) - diffusion timesteps
             z: (N, 1, token_size) - vision condition (single global feature)
                通过 ResNet GAP 或 ViT CLS token 得到的全局视觉特征
+            state: (N, in_channels) - 机器人当前状态 (n_obs_steps 最后一帧的动作值)
+                   作为无噪音的条件 token
 
         Returns:
-            noise_pred: (N, T, in_channels) - predicted noise
+            noise_pred: (N, T, in_channels) - predicted noise (仅预测 action[1:] 的噪音)
+
+        序列结构: [condition(t+z), state, noisy_action_1, ..., noisy_action_{T-1}]
         """
-        x = self.x_embedder(x)                              # (N, T, D)
+        x = self.x_embedder(x)                              # (N, T, D)  T = future_action_window - 1
         t = self.t_embedder(t)                              # (N, D)
         z = self.z_embedder(z, self.training)               # (N, 1, D)
         c = t.unsqueeze(1) + z                              # (N, 1, D)
-        x = torch.cat((c, x), dim=1)                        # (N, T+1, D)
-        x = x + self.positional_embedding                   # (N, T+1, D)
-        for block in self.blocks:
-            x = block(x)                                    # (N, T+1, D)
-        x = self.final_layer(x)                             # (N, T+1, out_channels)
-        return x[:, 1:, :]     # (N, T, C)
 
-    def forward_with_cfg(self, x, t, z, cfg_scale):
+        if state is not None:
+            s = self.state_embedder(state)                  # (N, D)
+            s = s.unsqueeze(1)                              # (N, 1, D)
+            x = torch.cat((c, s, x), dim=1)                # (N, 1+1+T, D) = (N, T+2, D)
+        else:
+            x = torch.cat((c, x), dim=1)                   # (N, T+1, D)
+
+        x = x + self.positional_embedding                   # (N, T+1+1, D)
+        for block in self.blocks:
+            x = block(x)
+        x = self.final_layer(x)
+
+        if state is not None:
+            return x[:, 2:, :]  # (N, T, C) 跳过 condition 和 state tokens
+        else:
+            return x[:, 1:, :]  # (N, T, C) 兼容无 state 的情况
+
+    def forward_with_cfg(self, x, t, z, cfg_scale, state=None):
         """
         Forward pass of Diffusion, but also batches the unconditional forward pass for classifier-free guidance.
         """
-        
+
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0).to(next(self.x_embedder.parameters()).dtype)
-        model_out = self.forward(combined, t, z)
+        model_out = self.forward(combined, t, z, state=state)
         # eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
         eps, rest = model_out[:, :, :self.in_channels], model_out[:, :, self.in_channels:]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)

@@ -6,7 +6,6 @@ from model.feature_adaptation import create_feature_adapter
 import torch
 from torch import nn
 
-
 # 生成动作模型（根据默认DiT尺寸）
 def DiT_S(**kwargs):
     return DiT(depth=6, hidden_size=384, num_heads=4, **kwargs)
@@ -27,24 +26,26 @@ def DiT_XL(**kwargs):
 DiT_models = {'DiT-S': DiT_S, 'DiT-B': DiT_B, 'DiT-L': DiT_L, 'DiT-XL': DiT_XL}
 
 
-# 传参,vision_pretrained区分是否使用设定好的参数
 class ActionModel(nn.Module):
     """
     Diffusion-based Action Model for robot manipulation.
 
-    支持多帧观测输入 (n_obs_steps)，通过视觉编码器提取全局特征作为条件。
+    支持多帧观测输入 (n_obs_steps) 和 state 条件输入。
 
     时序设计:
         n_obs_steps: 观测步数，用于视觉编码的历史帧数
-        n_action_steps: 动作执行步数，实际执行的动作数（训练时不使用，推理时用于截断）
+        n_action_steps: 动作执行步数，实际执行的动作数（比原来少1帧，因为 state 占了第0帧）
+        state: n_obs_steps 最后一帧 = action 第0帧时刻的机器人状态
 
         ┌───┬───┬───┬───┬───┬───┬───┬───┬───┬───┐
         │O-1│ O │ A │ A │ A │ A │ A │ A │ A │ A │...
         └───┴───┴───┴───┴───┴───┴───┴───┴───┴───┘
-              │   └───────────────────────────────┘
-              │         future_action_window_size
+              │   │   └───────────────────────────┘
+              │   │     predicted actions (T-1 帧，有噪音)
+              │   │
+              │   └── state = action[0]，无噪音条件
               │
-              └─── n_obs_steps 的最后一帧 = action 的第一帧时刻
+              └─── n_obs_steps 的最后一帧
     """
 
     def __init__(self,
@@ -149,16 +150,19 @@ class ActionModel(nn.Module):
 
         return vision_condition
 
-    # Given condition z and ground truth token x, compute loss
-    def loss(self, x, z=None, images=None):
+    # Given condition z, state and ground truth token x, compute loss
+    def loss(self, x, z=None, images=None, state=None):
         """
         Compute diffusion loss.
 
+        噪音仅施加在 action[1:] 上 (即 x)，state (action[0]) 作为无噪音条件传入模型。
+
         Args:
-            x: (batch_size, future_action_window_size, in_channels) - ground truth actions
+            x: (batch_size, future_action_window_size - 1, in_channels) - ground truth actions (不含 state)
             z: (batch_size, 1, token_size) - precomputed vision condition (optional)
             images: (batch_size, n_obs_steps, num_cameras, 3, H, W) - raw images (optional)
                    or (batch_size, num_cameras, 3, H, W) for single frame
+            state: (batch_size, in_channels) - 机器人当前状态 (action[0])，无噪音
 
         Returns:
             loss: scalar loss value
@@ -170,15 +174,15 @@ class ActionModel(nn.Module):
         if z is None:
             raise ValueError("Either z or images must be provided")
 
-        # sample random noise and timestep
-        noise = torch.randn_like(x)  # [B, T, C]
+        # sample random noise and timestep — 噪音仅施加在 actions 上，不影响 state
+        noise = torch.randn_like(x)  # [B, T-1, C]
         timestep = torch.randint(0, self.diffusion.num_timesteps, (x.size(0),), device=x.device)
 
-        # sample x_t from x
+        # sample x_t from x (forward diffusion on actions only)
         x_t = self.diffusion.q_sample(x, timestep, noise)
 
-        # predict noise from x_t
-        noise_pred = self.net(x_t, timestep, z)
+        # predict noise from x_t, with state as clean conditioning
+        noise_pred = self.net(x_t, timestep, z, state=state)
 
         assert noise_pred.shape == noise.shape == x.shape
         # Compute L2 loss
@@ -198,26 +202,27 @@ class ActionModel(nn.Module):
         return self.ddim_diffusion
 
     @torch.no_grad()
-    def sample(self, images, ddim_steps=10, use_ddim=True, cfg_scale=1.5, return_all=False):
+    def sample(self, images, state=None, ddim_steps=100, use_ddim=True, cfg_scale=1.5, return_all=False):
         """
-        从观测图像生成动作序列 (推理/采样)。
+        从观测图像和当前状态生成动作序列 (推理/采样)。
 
         推理流程:
         1. 编码视觉条件: images -> z (B, 1, token_size)
-        2. 从高斯噪声开始，通过 DDIM 采样生成动作序列
+        2. 从高斯噪声开始，通过 DDIM 采样生成动作序列 (future_action_window - 1 帧)
         3. 截取前 n_action_steps 步动作用于执行
 
         Args:
             images: (B, n_obs_steps, num_cameras, C, H, W) - 多帧多相机观测
                    or (B, num_cameras, C, H, W) - 单帧多相机
-            ddim_steps: DDIM 采样步数，越大质量越好但速度越慢 (default: 10)
+            state: (B, in_channels) - 机器人当前状态 (n_obs_steps 最后一帧的动作值)
+            ddim_steps: DDIM 采样步数，越大质量越好但速度越慢 (default: 100)
             use_ddim: 是否使用 DDIM 加速采样 (default: True)
-            cfg_scale: Classifier-free guidance scale (default: 1.0, 无 guidance)
-            return_all: 是否返回完整的 future_action_window_size 动作 (default: False)
+            cfg_scale: Classifier-free guidance scale (default: 1.5, 无 guidance)
+            return_all: 是否返回完整预测动作 (default: False)
 
         Returns:
             actions: (B, n_action_steps, in_channels) - 用于执行的动作序列
-                    如果 return_all=True，返回 (B, future_action_window_size, in_channels)
+                    如果 return_all=True，返回 (B, future_action_window_size - 1, in_channels)
         """
         device = next(self.parameters()).device
         batch_size = images.shape[0]
@@ -238,23 +243,24 @@ class ActionModel(nn.Module):
         # 3. 定义模型包装器 (用于 CFG)
         if cfg_scale > 1.0:
             # Classifier-free guidance: 需要同时计算条件和无条件预测
-            def model_fn(x, t, z):
-                return self.net.forward_with_cfg(x, t, z, cfg_scale)
+            def model_fn(x, t, **kwargs):
+                return self.net.forward_with_cfg(x, t, kwargs['z'], cfg_scale, state=kwargs.get('state'))
         else:
             # 无 guidance，直接使用模型
-            def model_fn(x, t, z):
-                return self.net(x, t, z)
+            def model_fn(x, t, **kwargs):
+                return self.net(x, t, kwargs['z'], state=kwargs.get('state'))
 
-        # 4. DDIM/DDPM 采样
-        shape = (batch_size, self.future_action_window_size, self.in_channels)
+        # 4. DDIM/DDPM 采样 — 生成 future_action_window - 1 帧 (不含 state)
+        predict_length = self.future_action_window_size - 1
+        shape = (batch_size, predict_length, self.in_channels)
         actions = sample_fn(
             model_fn,
             shape,
             clip_denoised=False,  # 动作空间不需要 clip 到 [-1, 1]
-            model_kwargs={'z': z},
+            model_kwargs={'z': z, 'state': state},
             device=device,
             progress=False,
-        )  # (B, future_action_window_size, in_channels)
+        )  # (B, future_action_window_size - 1, in_channels)
 
         # 5. 截取 n_action_steps 步动作
         if return_all:

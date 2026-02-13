@@ -14,7 +14,6 @@ from dataloader import RobotDataset
 
 
 def parse_args():
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Train DiT for robot action generation')
 
     # Data arguments
@@ -23,7 +22,7 @@ def parse_args():
     parser.add_argument('--num_cameras', type=int, default=4,
                         help='Number of camera views (default: 4)')
     parser.add_argument('--use_both_arms', action='store_true', default=True,
-                        help='Use both arms data (default: False)')
+                        help='Use both arms data (default: True)')
     parser.add_argument('--action_type', type=str, default='joint',
                         choices=['endpose', 'joint'],
                         help='Action type: endpose (ee pose) or joint (joint angles)')
@@ -38,30 +37,33 @@ def parse_args():
     parser.add_argument('--dropout_prob', type=float, default=0.1,
                         help='Class dropout probability for classifier-free guidance (default: 0.1)')
     parser.add_argument('--action_dim', type=int, default=7,
-                        help='Action dimension (default: 10 for 3D translation + 6D rot6d + 1D gripper)')
+                        help='Action dimension (default: 7 for 6-DoF joint angles + 1D gripper. 10 for 3D translation + 6D rot6d + 1D gripper)')
     parser.add_argument('--future_action_window', type=int, default=12,
-                        help='Number of future action steps to predict (default: 16)')
+                        help='Number of future action steps to predict (default: 12)')
+    # Past_Action 会对模型Action造成扰动，仅预留接口
     parser.add_argument('--past_action_window', type=int, default=0,
                         help='Number of past action steps as context (default: 0)')
+    # Token长度可根据输入Token情况更换
     parser.add_argument('--token_size', type=int, default=2048,
                         help='Token size for conditioning (default: 2048)')
 
-    # Diffusion Policy 时序参数
+    # Chunk机制参数
+    # n_obs_steps + n_action_steps ＜ future_action_window
     # n_obs_steps: 观测步数，用于视觉编码的历史帧数
     # n_obs_steps 的最后一帧对应动作序列的第一帧时刻
     parser.add_argument('--n_obs_steps', type=int, default=2,
                         help='Number of observation steps for visual conditioning (default: 2)')
-    # n_action_steps: 动作执行步数，推理时实际执行的动作步数
-    # 通常设置为 future_action_window 的一半或更少，用于 receding horizon control
-    parser.add_argument('--n_action_steps', type=int, default=8,
-                        help='Number of action steps to execute during inference (default: 8)')
-    # temporal_agg: 时间聚合方式
+    # temporal_agg: 时间聚合方式(区别于Action_Chunk的时间聚合)
     # - 'last': 只使用最后一帧观测
     # - 'mean': 对所有观测帧取平均
     # - 'concat': 拼接所有帧特征后投影
     parser.add_argument('--temporal_agg', type=str, default='concat',
                         choices=['last', 'mean', 'concat'],
                         help='Temporal aggregation method for multi-frame observations (default: concat)')
+    # n_action_steps: 动作执行步数，推理时实际执行的动作步数
+    # 通常设置为 future_action_window 的一半或更少，用于 receding horizon control
+    parser.add_argument('--n_action_steps', type=int, default=8,
+                        help='Number of action steps to execute during inference (default: 8)')
 
     # Vision arguments
     parser.add_argument('--vision_backbone', type=str, default='resnet50',
@@ -77,17 +79,15 @@ def parse_args():
 
     # Diffusion arguments
     parser.add_argument('--diffusion_steps', type=int, default=500,
-                        help='Number of diffusion steps (default: 100)')
+                        help='Number of diffusion steps (default: 500)')
     parser.add_argument('--noise_schedule', type=str, default='squaredcos_cap_v2',
                         help='Noise schedule type (default: squaredcos_cap_v2)')
 
     # Training arguments 
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size per GPU (default: 16)')
-
     parser.add_argument('--epochs', type=int, default=500,
-                        help='Number of training epochs (default: 500)')
-                        
+                        help='Number of training epochs (default: 500)')                      
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate (default: 1e-4)')
 
@@ -130,8 +130,8 @@ def parse_args():
     # Checkpoint arguments
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
                         help='Directory to save checkpoints (default: checkpoints)')
-    parser.add_argument('--save_every', type=int, default=10,
-                        help='Save checkpoint every N epochs (default: 10)')
+    parser.add_argument('--save_every', type=int, default=50,
+                        help='Save checkpoint every N epochs (default: 50)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
 
@@ -143,6 +143,12 @@ def parse_args():
     parser.add_argument('--image_size', type=int, default=224,
                         help='Image size for vision backbone (default: 224)')
 
+    # 图像预处理选项
+    # no_resize: 跳过 Resize 和 CenterCrop，保持原始图像尺寸
+    # 适用于所有相机图像尺寸一致的情况，可保留更多原始信息
+    parser.add_argument('--no_resize', action='store_true', default=False,
+                        help='Skip image resizing, use original size (requires same size for all cameras)')
+
     return parser.parse_args()
 
 
@@ -150,14 +156,26 @@ def prepare_dataloader(args):
     """Prepare robot dataset dataloader."""
 
     # Image transformations for vision backbone
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize(args.image_size),
-        transforms.CenterCrop(args.image_size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                           std=[0.229, 0.224, 0.225])  # ImageNet normalization
-    ])
+    if args.no_resize:
+        # 不缩放，保持原始图像尺寸，只做归一化
+        # 要求所有相机图像尺寸一致
+        transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                               std=[0.229, 0.224, 0.225])
+        ])
+        print("Using original image size (no resize)")
+    else:
+        # 标准预处理: Resize + CenterCrop + Normalize
+        transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.Resize(args.image_size),
+            transforms.CenterCrop(args.image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                               std=[0.229, 0.224, 0.225])  # ImageNet normalization
+        ])
 
     # Create dataset with n_obs_steps support
     dataset = RobotDataset(
@@ -169,7 +187,7 @@ def prepare_dataloader(args):
         use_both_arms=args.use_both_arms,
         action_type=args.action_type,
         quat_convention=args.quat_convention,
-        n_obs_steps=args.n_obs_steps,  # 多帧观测支持
+        n_obs_steps=args.n_obs_steps, 
     )
 
     # Create dataloader
@@ -388,15 +406,16 @@ def train():
 
         for batch_idx, batch in enumerate(progress_bar):
             # Move data to device
-            images = batch['images'].to(device)  # (B, num_cameras, 3, H, W)
-            actions = batch['actions'].to(device)  # (B, future_window, action_dim)
+            images = batch['images'].to(device)  # (B, n_obs_steps, num_cameras, 3, H, W)
+            state = batch['state'].to(device)    # (B, action_dim) - 机器人当前状态
+            actions = batch['actions'].to(device)  # (B, future_window - 1, action_dim)
 
             optimizer.zero_grad()
 
             if args.use_amp:
                 # Mixed Precision Training
                 with autocast():
-                    loss = model.loss(x=actions, images=images)
+                    loss = model.loss(x=actions, images=images, state=state)
 
                 # Backward pass with gradient scaling
                 scaler.scale(loss).backward()
@@ -410,7 +429,7 @@ def train():
                 scaler.update()
             else:
                 # Standard FP32 Training
-                loss = model.loss(x=actions, images=images)
+                loss = model.loss(x=actions, images=images, state=state)
 
                 loss.backward()
 

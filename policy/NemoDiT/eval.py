@@ -137,14 +137,15 @@ def prepare_eval_dataloader(data_path, train_args):
 
 
 @torch.no_grad()
-def evaluate_sample(model, images, gt_actions, ddim_steps, cfg_scale, device):
+def evaluate_sample(model, images, state, gt_actions, ddim_steps, cfg_scale, device):
     """
     对单个样本进行评估。
 
     Args:
         model: ActionModel
         images: (1, n_obs_steps, num_cameras, C, H, W) 观测图像
-        gt_actions: (1, future_action_window, action_dim) ground truth 动作
+        state: (1, action_dim) 机器人当前状态
+        gt_actions: (1, future_action_window - 1, action_dim) ground truth 动作 (不含 state)
         ddim_steps: DDIM 采样步数
         cfg_scale: CFG scale
         device: 计算设备
@@ -154,11 +155,13 @@ def evaluate_sample(model, images, gt_actions, ddim_steps, cfg_scale, device):
         metrics: 评估指标字典
     """
     images = images.to(device)
+    state = state.to(device)
     gt_actions = gt_actions.to(device)
 
-    # 推理生成动作
+    # 推理生成动作 (with state conditioning)
     pred_actions = model.sample(
         images,
+        state=state,
         ddim_steps=ddim_steps,
         cfg_scale=cfg_scale,
         return_all=False
@@ -199,19 +202,22 @@ def main():
 # 1. 加载模型
 model, train_args = load_model('checkpoints/100.pt', device)
 
-# 2. 准备观测图像
+# 2. 准备观测图像和当前状态
 # images shape: (batch_size, n_obs_steps, num_cameras, 3, H, W)
 # 例如: (1, 2, 4, 3, 224, 224) 表示 batch=1, 2帧观测, 4个相机
+# state shape: (batch_size, action_dim)
+# 例如: (1, 14) 表示机器人当前关节状态
 
-# 3. 推理生成动作
+# 3. 推理生成动作 (state 作为条件输入，不参与噪音扩散)
 actions = model.sample(
     images,
+    state=state,        # 机器人当前状态
     ddim_steps=10,      # DDIM 采样步数
     cfg_scale=1.0,      # CFG scale (1.0 = 无 guidance)
     return_all=False    # 只返回 n_action_steps 步
 )
 # actions shape: (batch_size, n_action_steps, action_dim)
-# 例如: (1, 8, 10) 表示 8 步动作，每步 10 维
+# 注意: 预测的是 state 之后的动作，不含 state 本身
 
 # 4. 执行动作 (receding horizon control)
 for i in range(n_action_steps):
@@ -236,10 +242,11 @@ for i in range(n_action_steps):
     for i in range(num_samples):
         sample = dataset[i]
         images = sample['images'].unsqueeze(0)  # (1, n_obs_steps, num_cameras, C, H, W)
-        gt_actions = sample['actions'].unsqueeze(0)  # (1, future_window, action_dim)
+        state = sample['state'].unsqueeze(0)    # (1, action_dim)
+        gt_actions = sample['actions'].unsqueeze(0)  # (1, future_window - 1, action_dim)
 
         pred_actions, metrics = evaluate_sample(
-            model, images, gt_actions,
+            model, images, state, gt_actions,
             args.ddim_steps, args.cfg_scale, device
         )
 

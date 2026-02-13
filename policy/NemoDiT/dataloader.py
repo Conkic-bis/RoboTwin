@@ -50,10 +50,12 @@ class RobotDataset(Dataset):
         ┌───┬───┬───┬───┬───┬───┬───┬───┬───┬───┐
         │O-1│ O │ A │ A │ A │ A │ A │ A │ A │ A │...
         └───┴───┴───┴───┴───┴───┴───┴───┴───┴───┘
-              │   └───────────────────────────────┘
-              │         future_action_window
+              │   │   └───────────────────────────┘
+              │   │     predicted actions (future_action_window - 1)
+              │   │
+              │   └── state = action[0]，机器人当前状态（无噪音）
               │
-              └─── n_obs_steps 的最后一帧 = action 的第一帧时刻
+              └─── n_obs_steps 的最后一帧 = state = action 的第0帧时刻
 
     Args:
         data_path: Path to directory containing episode HDF5 files
@@ -394,9 +396,16 @@ class RobotDataset(Dataset):
         # Stack all frames: (n_obs_steps, num_cameras, 3, H, W)
         images_tensor = torch.stack(all_frame_tensors, dim=0)
 
+        # 提取 state: action 的第0帧 = n_obs_steps 的最后一帧时刻的机器人状态
+        # state 不参与噪音扩散，作为模型的额外条件输入
+        state_tensor = action_tensor[0]  # (action_dim,)
+        # 预测目标: action[1:] (future_action_window - 1 帧)
+        actions_to_predict = action_tensor[1:]  # (future_action_window - 1, action_dim)
+
         return {
             'images': images_tensor,
-            'actions': action_tensor,
+            'state': state_tensor,
+            'actions': actions_to_predict,
             'episode_idx': episode_idx,
             'timestep': action_start_timestep,
         }
