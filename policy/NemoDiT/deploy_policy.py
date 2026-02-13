@@ -262,8 +262,9 @@ def eval_with_action_queue(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]
         # returns (n_action_steps, action_dim) in RoboTwin format
         all_actions = model.get_all_actions(obs)  # (n_action_steps, action_dim)
 
-        # Compute the mean across all predicted action steps
-        mean_action = np.mean(all_actions, axis=0)  # (action_dim,)
+        # Compute the mean across the first 4 predicted action steps
+        n_avg = min(4, len(all_actions))
+        mean_action = np.mean(all_actions[:n_avg], axis=0)  # (action_dim,)
 
         # Read current robot state from the observation
         current_state = obs["agent_pos"]  # (action_dim,)
