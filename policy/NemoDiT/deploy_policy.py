@@ -216,8 +216,8 @@ def eval(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
     # Get task instruction (if using language conditioning)
     instruction = TASK_ENV.get_instruction()
 
-    # Get all actions from the model
-    actions = model.get_all_actions(obs)
+    # Get actions from the model针对step by step推理必须要如下设置)
+    actions = model.get_action(obs)
 
     # Map policy action_type to environment action_type parameter
     if _ACTION_TYPE == "joint":

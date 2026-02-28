@@ -31,15 +31,15 @@ def parse_args():
                         help='Quaternion convention in HDF5 data (default: wxyz, only for endpose)')
 
     # Model arguments
-    parser.add_argument('--model_type', type=str, default='DiT-B',
+    parser.add_argument('--model_type', type=str, default='DiT-S',
                         choices=['DiT-S', 'DiT-B', 'DiT-L', 'DiT-XL'],
                         help='DiT model size (default: DiT-B)')
     parser.add_argument('--dropout_prob', type=float, default=0.1,
                         help='Class dropout probability for classifier-free guidance (default: 0.1)')
     parser.add_argument('--action_dim', type=int, default=7,
                         help='Action dimension (default: 7 for 6-DoF joint angles + 1D gripper. 10 for 3D translation + 6D rot6d + 1D gripper)')
-    parser.add_argument('--future_action_window', type=int, default=12,
-                        help='Number of future action steps to predict (default: 12)')
+    parser.add_argument('--future_action_window', type=int, default=13,
+                        help='Number of future action steps to predict (default: 13)')
     # Past_Action 会对模型Action造成扰动，仅预留接口
     parser.add_argument('--past_action_window', type=int, default=0,
                         help='Number of past action steps as context (default: 0)')
@@ -51,8 +51,8 @@ def parse_args():
     # n_obs_steps + n_action_steps ＜ future_action_window
     # n_obs_steps: 观测步数，用于视觉编码的历史帧数
     # n_obs_steps 的最后一帧对应动作序列的第一帧时刻
-    parser.add_argument('--n_obs_steps', type=int, default=2,
-                        help='Number of observation steps for visual conditioning (default: 2)')
+    parser.add_argument('--n_obs_steps', type=int, default=3,
+                        help='Number of observation steps for visual conditioning (default: 3)')
     # temporal_agg: 时间聚合方式(区别于Action_Chunk的时间聚合)
     # - 'last': 只使用最后一帧观测
     # - 'mean': 对所有观测帧取平均
@@ -110,7 +110,6 @@ def parse_args():
 
     # Mixed Precision Training (AMP)
     # 使用 FP16 混合精度训练，可显著减少显存占用并加速训练
-    # 在 Ampere 及以上架构 GPU (A100, RTX 30xx, RTX 40xx) 上效果最佳
     parser.add_argument('--use_amp', action='store_true', default=False,
                         help='Use Automatic Mixed Precision (FP16) training (default: False)')
 
@@ -120,6 +119,7 @@ def parse_args():
     # 有助于训练初期的稳定性，特别是使用大 batch size 或大学习率时
     parser.add_argument('--warmup_epochs', type=int, default=0,
                         help='Number of warmup epochs (default: 0, no warmup)')
+
     # warmup_type: 预热类型
     # - 'linear': 线性增加学习率
     # - 'cosine': 余弦曲线增加学习率
@@ -139,15 +139,18 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (default: cuda)')
 
-    # Image size
-    parser.add_argument('--image_size', type=int, default=224,
-                        help='Image size for vision backbone (default: 224)')
-
     # 图像预处理选项
     # no_resize: 跳过 Resize 和 CenterCrop，保持原始图像尺寸
     # 适用于所有相机图像尺寸一致的情况，可保留更多原始信息
-    parser.add_argument('--no_resize', action='store_true', default=False,
+    parser.add_argument('--no_resize', action='store_true', default=True,
                         help='Skip image resizing, use original size (requires same size for all cameras)')
+
+
+    # 保留resize，确保使用SigLip等模型直接调用
+    # 如果保留，需要更改相应的Eval文件
+    # Image size
+    parser.add_argument('--image_size', type=int, default=224,
+                        help='Image size for vision backbone (default: 224)')
 
     return parser.parse_args()
 

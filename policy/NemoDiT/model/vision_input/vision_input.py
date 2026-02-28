@@ -22,7 +22,7 @@ class VisionBackbone(nn.Module):
             - 'concat': 拼接所有帧特征后投影
 
     Returns:
-        image_embeds: (batch_size, 1, feature_dim) - 统一的全局视觉特征
+        image_embeds: (batch_size, n_tokens, feature_dim) - 统一的视觉特征序列
     """
 
     def __init__(
@@ -131,15 +131,16 @@ class VisionBackbone(nn.Module):
             x: (batch_size, channels, height, width)
 
         Returns:
-            features: (batch_size, 1, feature_dim) - 单个全局特征向量
+            features: (batch_size, n_tokens, feature_dim) - ResNet patch 特征序列
         """
         features = self.backbone(x)  # (B, C, H, W) e.g., (B, 2048, 7, 7)
 
-        # Global Average Pooling: 将空间维度聚合为单个全局特征
-        features = features.mean(dim=[2, 3])  # (B, C) e.g., (B, 2048)
+        # print(f"ResNet features shape: {features.shape}")
 
-        # 添加 token 维度，与 ViT 输出格式统一
-        features = features.unsqueeze(1)  # (B, 1, C)
+        batch_size, channels, height, width = features.shape
+        features = features.permute(0, 2, 3, 1).reshape(batch_size, height * width, channels)
+
+        # print(f"ResNet patch features shape: {features.shape}")
 
         return features
 
@@ -180,7 +181,7 @@ class VisionBackbone(nn.Module):
             images: (batch_size, num_cameras, C, H, W)
 
         Returns:
-            features: (batch_size, 1, feature_dim) - 融合后的单帧特征
+            features: (batch_size, n_tokens, feature_dim) - 融合后的单帧特征
         """
         batch_size, num_cams, C, H, W = images.shape
 
@@ -190,22 +191,24 @@ class VisionBackbone(nn.Module):
             cam_image = images[:, cam_idx]  # (B, C, H, W)
 
             # Extract features based on backbone type
-            # 两种 backbone 都输出 (B, 1, feature_dim)
+            # 两种 backbone 都输出 (B, n_tokens, feature_dim)
             if 'resnet' in self.backbone_type:
-                features = self.extract_resnet_features(cam_image)  # (B, 1, feature_dim)
+                features = self.extract_resnet_features(cam_image)  # (B, n_tokens, feature_dim)
             else:  # ViT
-                features = self.extract_vit_features(cam_image)  # (B, 1, feature_dim)
+                features = self.extract_vit_features(cam_image)  # (B, n_tokens, feature_dim)
 
             all_features.append(features)
 
         # Aggregate features from multiple cameras
+        # 更改feature_dim * num_cameras融合方式，替换原来的压缩一维变量
         if num_cams > 1:
-            # 沿特征维度拼接多相机特征: (B, 1, feature_dim * num_cameras)
-            frame_embeds = torch.cat(all_features, dim=2)  # (B, 1, feature_dim * num_cameras)
-            # 投影回原维度: (B, 1, feature_dim)
-            frame_embeds = self.camera_fusion(frame_embeds)  # (B, 1, feature_dim)
+            if all_features[0].shape[1] == 1:
+                frame_embeds = torch.cat(all_features, dim=2)  # (B, 1, feature_dim * num_cameras)
+                frame_embeds = self.camera_fusion(frame_embeds)  # (B, 1, feature_dim)
+            else:
+                frame_embeds = torch.cat(all_features, dim=1)  # (B, n_tokens * num_cameras, feature_dim)
         else:
-            frame_embeds = all_features[0]  # (B, 1, feature_dim)
+            frame_embeds = all_features[0]  # (B, n_tokens, feature_dim)
 
         return frame_embeds
 
@@ -221,7 +224,7 @@ class VisionBackbone(nn.Module):
         - 单帧单相机: (B, C, H, W)
 
         处理流程:
-        1. 对每帧提取多相机特征并融合: (B, 1, feature_dim)
+        1. 对每帧提取多相机特征并融合: (B, n_tokens, feature_dim)
         2. 时间聚合 (temporal_agg):
            - 'last': 只用最后一帧
            - 'mean': 所有帧取平均
@@ -233,7 +236,7 @@ class VisionBackbone(nn.Module):
                    or (B, C, H, W) - 单帧单相机
 
         Returns:
-            image_embeds: (B, 1, feature_dim) - 统一的全局视觉特征
+            image_embeds: (B, n_tokens, feature_dim) - 统一的视觉特征序列
         """
         # Normalize input to (B, n_obs_steps, num_cameras, C, H, W)
         if images.dim() == 4:
@@ -262,13 +265,13 @@ class VisionBackbone(nn.Module):
             image_embeds = frame_features[-1]  # (B, 1, feature_dim)
         elif self.temporal_agg == 'mean':
             # 对所有帧取平均
-            stacked = torch.stack(frame_features, dim=1)  # (B, n_frames, 1, feature_dim)
-            image_embeds = stacked.mean(dim=1)  # (B, 1, feature_dim)
+            stacked = torch.stack(frame_features, dim=1)  # (B, n_frames, n_tokens, feature_dim)
+            image_embeds = stacked.mean(dim=1)  # (B, n_tokens, feature_dim)
         elif self.temporal_agg == 'concat':
             # 拼接所有帧特征后投影
-            # frame_features: List of (B, 1, feature_dim)
-            concat_feat = torch.cat([f.squeeze(1) for f in frame_features], dim=-1)  # (B, feature_dim * n_frames)
-            image_embeds = self.temporal_fusion(concat_feat).unsqueeze(1)  # (B, 1, feature_dim)
+            # frame_features: List of (B, n_tokens, feature_dim)
+            concat_feat = torch.cat(frame_features, dim=-1)  # (B, n_tokens, feature_dim * n_frames)
+            image_embeds = self.temporal_fusion(concat_feat)  # (B, n_tokens, feature_dim)
         else:
             raise ValueError(f"Unknown temporal_agg: {self.temporal_agg}")
 
