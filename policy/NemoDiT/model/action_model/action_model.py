@@ -202,7 +202,7 @@ class ActionModel(nn.Module):
         return self.ddim_diffusion
 
     @torch.no_grad()
-    def sample(self, images, state=None, ddim_steps=100, use_ddim=True, cfg_scale=1.5, return_all=False):
+    def sample(self, images, state=None, ddim_steps=100, use_ddim=True, cfg_scale=0, return_all=False):
         """
         从观测图像和当前状态生成动作序列 (推理/采样)。
 

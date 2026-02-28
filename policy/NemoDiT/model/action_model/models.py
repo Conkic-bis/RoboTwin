@@ -15,7 +15,8 @@
 import torch
 import torch.nn as nn
 import math
-from timm.models.vision_transformer import Attention, Mlp
+import torch.nn.functional as F
+from timm.models.vision_transformer import Attention, Mlp, use_fused_attn
 
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
@@ -95,7 +96,7 @@ class LabelEmbedder(nn.Module):
         return embeddings
 
 #################################################################################
-#                      Embedding Layers for Actions and                         #
+#                      Embedding Layers for Actions and State                   #
 #################################################################################
 class ActionEmbedder(nn.Module):
     def __init__(self, action_size, hidden_size):
@@ -131,25 +132,78 @@ class StateEmbedder(nn.Module):
         return x
 
 #################################################################################
+#                          Cross Attention Layers                               #
+#################################################################################
+class CrossAttention(nn.Module):
+    def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = False, qk_norm: bool = False, attn_drop: float = 0, proj_drop: float = 0, norm_layer: nn.Module = nn.LayerNorm,) -> None:
+        super().__init__()
+        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.fused_attn = use_fused_attn()
+
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x: torch.Tensor, z: torch.Tensor, context=None) -> torch.Tensor:
+        B, N, C = x.shape
+        _, L, _ = z.shape
+        
+        q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        kv = self.kv(z).reshape(B, L, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        k, v = kv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                dropout_p=self.attn_drop.p if self.training else 0.,
+            )
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            attn = attn.softmax(dim=-1)
+            if self.attn_drop.p > 0:
+                attn = self.attn_drop(attn)
+            x = attn @ v
+            
+        x = x.permute(0, 2, 1, 3).reshape(B, N, C)
+        x = self.proj(x)
+        if self.proj_drop.p > 0:
+            x = self.proj_drop(x)
+        return x
+    
+#################################################################################
 #                                 Core DiT Model                                #
 #################################################################################
 
 class DiTBlock(nn.Module):
     """
-    A DiT block with self-attention conditioning.
+    A DiT block with self-attention and cross-attention conditioning.
     """
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.cross_attn = CrossAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
+        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
 
-    def forward(self, x):
+    def forward(self, x, z):
         x = x + self.attn(self.norm1(x))
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.cross_attn(self.norm2(x), z)
+        x = x + self.mlp(self.norm3(x))
         return x
 
 
@@ -283,38 +337,17 @@ class DiT(nn.Module):
         x = self.x_embedder(x)                              # (N, T, D)  T = future_action_window - 1
         t = self.t_embedder(t)                              # (N, D)
         z = self.z_embedder(z, self.training)               # (N, 1, D)
-        c = t.unsqueeze(1) + z                              # (N, 1, D)
+        t = t.unsqueeze(1)                                  # (N, 1, D)
 
-        if state is not None:
-            s = self.state_embedder(state)                  # (N, D)
-            s = s.unsqueeze(1)                              # (N, 1, D)
-            x = torch.cat((c, s, x), dim=1)                # (N, 1+1+T, D) = (N, T+2, D)
-        else:
-            x = torch.cat((c, x), dim=1)                   # (N, T+1, D)
+
+        s = self.state_embedder(state)                  # (N, D)
+        s = s.unsqueeze(1)                              # (N, 1, D)
+        x = torch.cat((t, s, x), dim=1)                # (N, 1+1+T, D) = (N, T+2, D)
 
         x = x + self.positional_embedding                   # (N, T+1+1, D)
         for block in self.blocks:
-            x = block(x)
+            x = block(x, z)
         x = self.final_layer(x)
 
-        if state is not None:
-            return x[:, 2:, :]  # (N, T, C) 跳过 condition 和 state tokens
-        else:
-            return x[:, 1:, :]  # (N, T, C) 兼容无 state 的情况
+        return x[:, 2:, :]  # (N, T, C) 跳过 timestep 和 state tokens
 
-    def forward_with_cfg(self, x, t, z, cfg_scale, state=None):
-        """
-        Forward pass of Diffusion, but also batches the unconditional forward pass for classifier-free guidance.
-        """
-
-        # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
-        half = x[: len(x) // 2]
-        combined = torch.cat([half, half], dim=0).to(next(self.x_embedder.parameters()).dtype)
-        model_out = self.forward(combined, t, z, state=state)
-        # eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
-        eps, rest = model_out[:, :, :self.in_channels], model_out[:, :, self.in_channels:]
-        cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
-        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
-        eps = torch.cat([half_eps, half_eps], dim=0)
-        # return torch.cat([eps, rest], dim=1)
-        return torch.cat([eps, rest], dim=2)
