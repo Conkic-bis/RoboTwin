@@ -22,6 +22,7 @@ import yaml
 from typing import Dict, Any
 
 from .nemo_dit_model import NemoDiT
+from .utils.rotation_utils import convert_endpose_7d_to_9d
 
 
 # ImageNet normalization constants
@@ -86,9 +87,30 @@ def encode_obs(observation: Dict[str, Any]) -> Dict[str, np.ndarray]:
         "images": images,
     }
 
-    # Add agent position if available
-    if "joint_action" in observation:
-        obs["agent_pos"] = observation["joint_action"]["vector"]
+    # Extract robot state (agent_pos) for state conditioning
+    # Format must match model's action representation:
+    #   joint mode:   [left_arm(6), left_gripper(1), right_arm(6), right_gripper(1)] = 14D
+    #   endpose mode: [left_9d(9), left_gripper(1), right_9d(9), right_gripper(1)] = 20D
+    if _ACTION_TYPE == "joint" and "joint_action" in observation:
+        joint_action = observation["joint_action"]
+        left_arm = np.array(joint_action["left_arm"], dtype=np.float32)
+        left_gripper = np.array([joint_action["left_gripper"]], dtype=np.float32)
+        right_arm = np.array(joint_action["right_arm"], dtype=np.float32)
+        right_gripper = np.array([joint_action["right_gripper"]], dtype=np.float32)
+        obs["agent_pos"] = np.concatenate([left_arm, left_gripper, right_arm, right_gripper])
+    elif _ACTION_TYPE == "endpose" and "endpose" in observation:
+        endpose = observation["endpose"]
+        # Environment returns 7D: [x, y, z, qw, qx, qy, qz] (wxyz convention)
+        left_endpose_7d = np.array(endpose["left_endpose"], dtype=np.float32).reshape(1, 7)
+        right_endpose_7d = np.array(endpose["right_endpose"], dtype=np.float32).reshape(1, 7)
+        # Convert quaternion -> rot6d: (1, 7) -> (1, 9)
+        left_endpose_9d = convert_endpose_7d_to_9d(left_endpose_7d, quat_convention="wxyz")[0]
+        right_endpose_9d = convert_endpose_7d_to_9d(right_endpose_7d, quat_convention="wxyz")[0]
+        left_gripper = np.array([endpose["left_gripper"]], dtype=np.float32)
+        right_gripper = np.array([endpose["right_gripper"]], dtype=np.float32)
+        obs["agent_pos"] = np.concatenate([
+            left_endpose_9d, left_gripper, right_endpose_9d, right_gripper
+        ])
 
     return obs
 
@@ -237,8 +259,16 @@ def eval_with_action_queue(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]
 
     This can be more responsive to environment changes.
     """
+    global _ACTION_TYPE
+
     obs = encode_obs(observation)
     instruction = TASK_ENV.get_instruction()
+
+    # Map policy action_type to environment action_type parameter
+    if _ACTION_TYPE == "joint":
+        control_mode = "qpos"
+    else:  # endpose
+        control_mode = "ee"
 
     max_steps = 1000  # Maximum steps per episode
 
@@ -248,7 +278,7 @@ def eval_with_action_queue(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]
         action = actions[0]
 
         # Execute action
-        TASK_ENV.take_action(action, control_mode="ee")
+        TASK_ENV.take_action(action, action_type=control_mode)
 
         # Check if done
         observation = TASK_ENV.get_obs()

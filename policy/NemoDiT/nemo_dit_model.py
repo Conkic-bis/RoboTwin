@@ -132,6 +132,10 @@ class NemoDiT:
         else:
             self.obs_cache['images'].append(obs['images'])
 
+        # Cache current robot state for state conditioning
+        if 'agent_pos' in obs:
+            self.obs_cache['agent_pos'] = obs['agent_pos']
+
     def _prepare_vision_input(self) -> torch.Tensor:
         """Prepare vision input from observation cache."""
         if self.obs_cache is None or len(self.obs_cache['images']) == 0:
@@ -149,6 +153,17 @@ class NemoDiT:
         images_tensor = torch.from_numpy(images).float().to(self.device)
 
         return images_tensor
+
+    def _prepare_state_input(self) -> Optional[torch.Tensor]:
+        """Prepare state tensor from observation cache for state conditioning."""
+        if self.obs_cache is None or 'agent_pos' not in self.obs_cache:
+            return None
+
+        agent_pos = self.obs_cache['agent_pos']  # (action_dim,)
+        # Add batch dimension and convert to tensor
+        state = np.expand_dims(agent_pos, axis=0)  # (1, action_dim)
+        state_tensor = torch.from_numpy(state).float().to(self.device)
+        return state_tensor
 
     def _convert_action_to_robotwin(self, action: np.ndarray) -> np.ndarray:
         """
@@ -243,9 +258,13 @@ class NemoDiT:
         # Prepare input: (1, n_obs_steps, num_cameras, C, H, W)
         images = self._prepare_vision_input()
 
+        # Prepare state for conditioning: (1, action_dim)
+        state = self._prepare_state_input()
+
         # 使用 model.sample() 进行推理，与 eval.py 一致
         action_pred = self.model.sample(
             images,
+            state=state,
             ddim_steps=self.ddim_steps,
             cfg_scale=1.0,  # 无 classifier-free guidance
             return_all=False  # 只返回 n_action_steps 步
@@ -283,9 +302,13 @@ class NemoDiT:
         # Prepare input: (1, n_obs_steps, num_cameras, C, H, W)
         images = self._prepare_vision_input()
 
+        # Prepare state for conditioning: (1, action_dim)
+        state = self._prepare_state_input()
+
         # 使用 model.sample() 进行推理，截取 n_action_steps 步用于执行
         action_pred = self.model.sample(
             images,
+            state=state,
             ddim_steps=self.ddim_steps,
             cfg_scale=1.0,  # 无 classifier-free guidance
             return_all=False  # 只返回 n_action_steps 步
