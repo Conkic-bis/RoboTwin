@@ -132,20 +132,17 @@ class RobotDataset(Dataset):
 
     def _build_indices(self) -> List[tuple]:
         """
-        Build valid indices for sampling.
+        Build indices for sampling.
 
-        考虑 n_obs_steps 的时序约束:
-        - 需要 n_obs_steps - 1 帧历史观测
-        - 需要 future_action_window 帧未来动作
+        所有 timestep 均为合法 sample，边界处通过 padding 补齐:
+        - 左侧不足 n_obs_steps 帧时，用第 0 帧重复填充
+        - 右侧不足 future_action_window 帧时，用最后一帧重复填充
 
         Returns:
             List of (episode_idx, action_start_timestep) tuples
             action_start_timestep 是动作序列的起始帧（也是 n_obs_steps 的最后一帧）
         """
         indices = []
-
-        # pad_before: 观测序列开头需要的额外帧数
-        pad_before = self.n_obs_steps - 1
 
         for ep_idx, ep_file in enumerate(self.episode_files):
             with h5py.File(ep_file, 'r') as f:
@@ -157,10 +154,8 @@ class RobotDataset(Dataset):
 
                 episode_length = f[data_key].shape[0]
 
-                # Valid action start timesteps
-                # - 需要 pad_before 帧历史观测 (从 t - pad_before 到 t)
-                # - 需要 future_action_window 帧未来动作 (从 t 到 t + future_action_window - 1)
-                for t in range(pad_before, episode_length - self.future_action_window + 1):
+                # 所有 timestep 都可作为 sample，边界处用 padding 补齐
+                for t in range(episode_length):
                     indices.append((ep_idx, t))
 
         return indices
@@ -187,9 +182,18 @@ class RobotDataset(Dataset):
                          Dual arm:   (T, 14) = (6D + 1D) * 2
         """
         if self.action_type == 'endpose':
-            return self._load_endpose_actions(f, start_idx)
+            actions = self._load_endpose_actions(f, start_idx)
         else:  # joint
-            return self._load_joint_actions(f, start_idx)
+            actions = self._load_joint_actions(f, start_idx)
+
+        # 右侧 padding: 当 start_idx + future_action_window 超出 episode 长度时，
+        # 用最后一帧的值重复填充
+        if actions.shape[0] < self.future_action_window:
+            pad_len = self.future_action_window - actions.shape[0]
+            padding = np.repeat(actions[-1:], pad_len, axis=0)
+            actions = np.concatenate([actions, padding], axis=0)
+
+        return actions
 
     def _load_endpose_actions(self, f: h5py.File, start_idx: int) -> np.ndarray:
         """Load end-effector pose actions and convert to rot6d representation."""
@@ -338,7 +342,9 @@ class RobotDataset(Dataset):
         obs_start = action_start_timestep - self.n_obs_steps + 1
 
         for t in range(obs_start, action_start_timestep + 1):
-            frame_images = self._load_images(f, t)
+            # 左侧 padding: 当 t < 0 时，用第 0 帧重复填充
+            t_clamped = max(0, t)
+            frame_images = self._load_images(f, t_clamped)
             obs_images.append(frame_images)
 
         return obs_images
