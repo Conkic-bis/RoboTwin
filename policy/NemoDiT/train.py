@@ -11,6 +11,7 @@ from pathlib import Path
 
 from model.action_model.action_model import ActionModel
 from dataloader import RobotDataset
+from utils.wandb_utils import WandbLogger
 
 
 def parse_args():
@@ -138,6 +139,16 @@ def parse_args():
     # Device arguments
     parser.add_argument('--device', type=str, default='cuda',
                         help='Device to use (default: cuda)')
+
+    # WandB arguments
+    parser.add_argument('--use_wandb', action='store_true', default=False,
+                        help='Use Weights & Biases for logging')
+    parser.add_argument('--wandb_project', type=str, default='robotwin_nemodit',
+                        help='WandB project name')
+    parser.add_argument('--wandb_entity', type=str, default=None,
+                        help='WandB entity (username or team name)')
+    parser.add_argument('--wandb_name', type=str, default=None,
+                        help='WandB run name')
 
     # 图像预处理选项
     # no_resize: 跳过 Resize 和 CenterCrop，保持原始图像尺寸
@@ -349,6 +360,18 @@ def train():
     print(f"Temporal settings: n_obs_steps={args.n_obs_steps}, n_action_steps={args.n_action_steps}, "
           f"future_action_window={args.future_action_window}, temporal_agg={args.temporal_agg}")
 
+    # Initialize WandB
+    wandb_logger = None
+    if args.use_wandb:
+        print("Initializing WandB...")
+        run_name = args.wandb_name if args.wandb_name else f"{os.path.basename(args.checkpoint_dir)}_{args.model_type}"
+        wandb_logger = WandbLogger(
+            project_name=args.wandb_project,
+            run_name=run_name,
+            config=vars(args),
+            entity=args.wandb_entity
+        )
+
     # Create dataloader
     print("Loading dataset...")
     dataloader, dataset = prepare_dataloader(args)
@@ -446,6 +469,15 @@ def train():
             epoch_loss += loss.item()
             global_step += 1
 
+            # Log to WandB
+            if wandb_logger:
+                wandb_logger.log({
+                    'train/loss': loss.item(),
+                    'train/lr': optimizer.param_groups[0]["lr"],
+                    'train/epoch': epoch + 1,
+                    'train/global_step': global_step
+                }, step=global_step)
+
             # Update progress bar
             progress_bar.set_postfix({
                 'loss': f'{loss.item():.4f}',
@@ -467,6 +499,9 @@ def train():
     # Save final checkpoint
     print("Training completed!")
     save_checkpoint(model, optimizer, scheduler, scaler, args.epochs, global_step, args, filename='final.pt')
+
+    if wandb_logger:
+        wandb_logger.finish()
 
 
 if __name__ == '__main__':
