@@ -14,6 +14,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 from timm.models.vision_transformer import Attention, Mlp
 
@@ -262,6 +263,15 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
+    def _get_positional_embedding(self, seq_len, device, dtype):
+        pos = self.positional_embedding
+        if pos.shape[0] == seq_len:
+            return pos.to(device=device, dtype=dtype).unsqueeze(0)
+        pos = pos.to(device=device, dtype=dtype).unsqueeze(0).transpose(1, 2)
+        pos = F.interpolate(pos, size=seq_len, mode="linear", align_corners=False)
+        pos = pos.transpose(1, 2)
+        return pos
+
     def forward(self, x, t, z, state=None):
         """
         Forward pass of DiT.
@@ -280,27 +290,28 @@ class DiT(nn.Module):
 
         序列结构: [condition(t+z), state, noisy_action_1, ..., noisy_action_{T-1}]
         """
-        x = self.x_embedder(x)                              # (N, T, D)  T = future_action_window - 1
-        t = self.t_embedder(t)                              # (N, D)
-        z = self.z_embedder(z, self.training)               # (N, 1, D)
-        c = t.unsqueeze(1) + z                              # (N, 1, D)
+        x = self.x_embedder(x)
+        t = self.t_embedder(t)
+        z = self.z_embedder(z, self.training)
+        c = t.unsqueeze(1) + z
+        cond_len = c.shape[1]
 
         if state is not None:
-            s = self.state_embedder(state)                  # (N, D)
-            s = s.unsqueeze(1)                              # (N, 1, D)
-            x = torch.cat((c, s, x), dim=1)                # (N, 1+1+T, D) = (N, T+2, D)
+            s = self.state_embedder(state)
+            s = s.unsqueeze(1)
+            x = torch.cat((c, s, x), dim=1)
+            offset = cond_len + 1
         else:
-            x = torch.cat((c, x), dim=1)                   # (N, T+1, D)
+            x = torch.cat((c, x), dim=1)
+            offset = cond_len
 
-        x = x + self.positional_embedding                   # (N, T+1+1, D)
+        pos = self._get_positional_embedding(x.shape[1], x.device, x.dtype)
+        x = x + pos
         for block in self.blocks:
             x = block(x)
         x = self.final_layer(x)
 
-        if state is not None:
-            return x[:, 2:, :]  # (N, T, C) 跳过 condition 和 state tokens
-        else:
-            return x[:, 1:, :]  # (N, T, C) 兼容无 state 的情况
+        return x[:, offset:, :]
 
     def forward_with_cfg(self, x, t, z, cfg_scale, state=None):
         """
