@@ -49,7 +49,7 @@ n_action_steps: 8          # Number of action steps to execute per inference
                             # Should be <= future_action_window from training
 
 # DDIM sampling settings
-ddim_steps: 100              # Number of DDIM denoising steps
+ddim_steps: 50              # Number of DDIM denoising steps
                             # Lower = faster but less accurate
                             # Higher = slower but more accurate
 
