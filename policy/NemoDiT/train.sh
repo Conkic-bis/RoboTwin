@@ -68,7 +68,7 @@ head_camera_type="D435"       # Head camera type
 # ============================================================================
 # WandB Configuration
 # ============================================================================
-use_wandb=""                  # Set to "--use_wandb" to enable WandB logging
+use_wandb="--use_wandb"                  # Set to "--use_wandb" to enable WandB logging
 wandb_project="robotwin_nemodit" # WandB project name
 wandb_entity=""               # WandB entity (username or team name)
                               # Leave empty to use your default entity
