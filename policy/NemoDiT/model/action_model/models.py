@@ -61,7 +61,9 @@ class TimestepEmbedder(nn.Module):
         return embedding
 
     def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size).to(next(self.mlp.parameters()).dtype)
+        # Scale continuous timesteps [0, 1] to [0, 1000] for richer sinusoidal embeddings
+        t_scaled = t * 1000.0
+        t_freq = self.timestep_embedding(t_scaled, self.frequency_embedding_size).to(next(self.mlp.parameters()).dtype)
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -224,17 +226,20 @@ class FinalLayer(nn.Module):
 
 class DiT(nn.Module):
     """
-    Diffusion model with a Transformer backbone.
+    Flow Matching model with a Transformer backbone.
+
+    使用 Conditional Flow Matching (rectified flow) 学习速度场 v(x_t, t)。
+    时间步 t 为连续值 [0,1]，t=0 为纯噪声，t=1 为干净数据。
 
     支持 state 条件输入:
         state 是机器人当前状态 (n_obs_steps 最后一帧 = action 第0帧)，
         作为无噪音的条件 token 参与 transformer 计算。
 
-        序列结构: [condition(t+z), state, noisy_action_1, ..., noisy_action_{T-1}]
+        序列结构: [condition(t+z), state, action_1, ..., action_{T-1}]
         - condition: timestep + vision condition (1 token)
         - state: 机器人当前状态，无噪音 (1 token)
-        - noisy actions: 需要去噪的未来动作序列 (T-1 tokens)
-        总长度 = 1 + 1 + (T-1) = T+1，与原来的位置编码大小一致
+        - actions: 插值后的动作序列 (T-1 tokens)
+        总长度 = 1 + 1 + (T-1) = T+1，与位置编码大小一致
     """
     def __init__(
         self,
@@ -321,18 +326,19 @@ class DiT(nn.Module):
         Forward pass of DiT.
 
         Args:
-            x: (N, T, in_channels) - noisy action sequence to denoise
-               T = future_action_window_size - 1 (state 不参与去噪)
-            t: (N,) - diffusion timesteps
+            x: (N, T, in_channels) - interpolated action sequence at timestep t
+               T = future_action_window_size - 1 (state 不参与)
+            t: (N,) - flow matching timesteps in [0, 1] (continuous)
+               t=0 为纯噪声，t=1 为干净数据
             z: (N, 1, token_size) - vision condition (single global feature)
                通过 ResNet GAP 或 ViT CLS token 得到的全局视觉特征
             state: (N, in_channels) - 机器人当前状态 (n_obs_steps 最后一帧的动作值)
                    作为无噪音的条件 token
 
         Returns:
-            noise_pred: (N, T, in_channels) - predicted noise (仅预测 action[1:] 的噪音)
+            v_pred: (N, T, in_channels) - predicted velocity field (仅预测 action[1:] 的速度)
 
-        序列结构: [condition(t+z), state, noisy_action_1, ..., noisy_action_{T-1}]
+        序列结构: [condition(t+z), state, action_1, ..., action_{T-1}]
         """
         x = self.x_embedder(x)                              # (N, T, D)  T = future_action_window - 1
         t = self.t_embedder(t)                              # (N, D)

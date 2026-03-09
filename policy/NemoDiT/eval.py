@@ -1,5 +1,5 @@
 """
-Evaluation/Inference script for DiT Action Model.
+Evaluation/Inference script for DiT Action Model (Flow Matching).
 
 使用训练好的模型进行推理，从观测图像生成动作序列。
 
@@ -9,7 +9,7 @@ Usage:
 推理流程:
     1. 加载训练好的模型权重
     2. 从数据集加载观测图像 (n_obs_steps 帧)
-    3. 使用 DDIM 采样生成 future_action_window_size 步动作
+    3. 使用 Flow Matching Euler 采样生成 future_action_window_size 步动作
     4. 截取前 n_action_steps 步动作用于执行
 """
 import torch
@@ -37,8 +37,8 @@ def parse_args():
                         help='Number of samples to evaluate (default: 5)')
 
     # Inference arguments
-    parser.add_argument('--ddim_steps', type=int, default=10,
-                        help='DDIM sampling steps (default: 10)')
+    parser.add_argument('--num_steps', type=int, default=10,
+                        help='Flow matching Euler integration steps (default: 10)')
     parser.add_argument('--cfg_scale', type=float, default=1.0,
                         help='Classifier-free guidance scale (default: 1.0, no guidance)')
 
@@ -78,8 +78,7 @@ def load_model(checkpoint_path, device):
         in_channels=train_args['action_dim'],
         future_action_window_size=train_args['future_action_window'],
         past_action_window_size=train_args['past_action_window'],
-        diffusion_steps=train_args['diffusion_steps'],
-        noise_schedule=train_args['noise_schedule'],
+        num_inference_steps=train_args.get('num_inference_steps', 10),
         use_vision_condition=True,
         vision_backbone_type=train_args['vision_backbone'],
         vision_pretrained=False,  # 不需要预训练权重，我们会加载训练好的
@@ -137,7 +136,7 @@ def prepare_eval_dataloader(data_path, train_args):
 
 
 @torch.no_grad()
-def evaluate_sample(model, images, state, gt_actions, ddim_steps, cfg_scale, device):
+def evaluate_sample(model, images, state, gt_actions, num_steps, cfg_scale, device):
     """
     对单个样本进行评估。
 
@@ -146,7 +145,7 @@ def evaluate_sample(model, images, state, gt_actions, ddim_steps, cfg_scale, dev
         images: (1, n_obs_steps, num_cameras, C, H, W) 观测图像
         state: (1, action_dim) 机器人当前状态
         gt_actions: (1, future_action_window - 1, action_dim) ground truth 动作 (不含 state)
-        ddim_steps: DDIM 采样步数
+        num_steps: Flow matching Euler 积分步数
         cfg_scale: CFG scale
         device: 计算设备
 
@@ -162,7 +161,7 @@ def evaluate_sample(model, images, state, gt_actions, ddim_steps, cfg_scale, dev
     pred_actions = model.sample(
         images,
         state=state,
-        ddim_steps=ddim_steps,
+        num_steps=num_steps,
         cfg_scale=cfg_scale,
         return_all=False
     )  # (1, n_action_steps, action_dim)
@@ -208,11 +207,11 @@ model, train_args = load_model('checkpoints/100.pt', device)
 # state shape: (batch_size, action_dim)
 # 例如: (1, 14) 表示机器人当前关节状态
 
-# 3. 推理生成动作 (state 作为条件输入，不参与噪音扩散)
+# 3. 推理生成动作 (Flow Matching Euler 积分，state 作为条件输入)
 actions = model.sample(
     images,
     state=state,        # 机器人当前状态
-    ddim_steps=10,      # DDIM 采样步数
+    num_steps=10,       # Euler 积分步数
     cfg_scale=1.0,      # CFG scale (1.0 = 无 guidance)
     return_all=False    # 只返回 n_action_steps 步
 )
@@ -247,7 +246,7 @@ for i in range(n_action_steps):
 
         pred_actions, metrics = evaluate_sample(
             model, images, state, gt_actions,
-            args.ddim_steps, args.cfg_scale, device
+            args.num_steps, args.cfg_scale, device
         )
 
         all_mse.append(metrics['mse'])

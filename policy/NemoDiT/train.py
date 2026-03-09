@@ -78,11 +78,9 @@ def parse_args():
                         choices=['linear', 'mlp', 'attention_pooling'],
                         help='Feature adapter type')
 
-    # Diffusion arguments
-    parser.add_argument('--diffusion_steps', type=int, default=500,
-                        help='Number of diffusion steps (default: 500)')
-    parser.add_argument('--noise_schedule', type=str, default='squaredcos_cap_v2',
-                        help='Noise schedule type (default: squaredcos_cap_v2)')
+    # Flow Matching arguments
+    parser.add_argument('--num_inference_steps', type=int, default=10,
+                        help='Number of Euler integration steps for sampling (default: 10)')
 
     # Training arguments 
     parser.add_argument('--batch_size', type=int, default=16,
@@ -226,8 +224,7 @@ def create_model(args):
         in_channels=args.action_dim,
         future_action_window_size=args.future_action_window,
         past_action_window_size=args.past_action_window,
-        diffusion_steps=args.diffusion_steps,
-        noise_schedule=args.noise_schedule,
+        num_inference_steps=args.num_inference_steps,
         use_vision_condition=True,
         vision_backbone_type=args.vision_backbone,
         vision_pretrained=args.vision_pretrained,

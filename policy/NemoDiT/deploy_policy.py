@@ -129,7 +129,7 @@ def get_model(usr_args: Dict[str, Any]) -> NemoDiT:
             Optional keys:
             - n_obs_steps: Number of observation steps (default: 1)
             - n_action_steps: Number of actions to execute (default: 10)
-            - ddim_steps: DDIM sampling steps (default: 10)
+            - num_steps: Flow matching Euler integration steps (default: 10)
             - use_both_arms: Whether to use dual arm (default: True)
             - quat_convention: Output quaternion convention (default: "wxyz")
             - action_type: Action type - "endpose" or "joint" (default: "endpose")
@@ -160,7 +160,7 @@ def get_model(usr_args: Dict[str, Any]) -> NemoDiT:
     # Model configuration
     n_obs_steps = usr_args.get('n_obs_steps', 1)
     n_action_steps = usr_args.get('n_action_steps', 10)
-    ddim_steps = usr_args.get('ddim_steps', 10)
+    num_steps = usr_args.get('num_steps', usr_args.get('ddim_steps', 10))
     use_both_arms = usr_args.get('use_both_arms', True)
     quat_convention = usr_args.get('quat_convention', 'wxyz')
     action_type = usr_args.get('action_type', 'endpose')
@@ -173,7 +173,7 @@ def get_model(usr_args: Dict[str, Any]) -> NemoDiT:
         ckpt_file=ckpt_file,
         n_obs_steps=n_obs_steps,
         n_action_steps=n_action_steps,
-        ddim_steps=ddim_steps,
+        num_steps=num_steps,
         device="cuda:0",
         quat_convention=quat_convention,
         use_both_arms=use_both_arms,

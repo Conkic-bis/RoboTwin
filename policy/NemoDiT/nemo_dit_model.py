@@ -22,16 +22,18 @@ class NemoDiT:
         ckpt_file: str,
         n_obs_steps: int = 1,
         n_action_steps: int = 10,
-        ddim_steps: int = 10,
+        num_steps: int = 10,
         device: str = "cuda:0",
         quat_convention: str = "wxyz",
         use_both_arms: bool = True,
         action_type: str = "endpose",
+        # Legacy param (mapped to num_steps)
+        ddim_steps: int = None,
     ):
         self.device = device
         self.n_obs_steps = n_obs_steps
         self.n_action_steps = n_action_steps
-        self.ddim_steps = ddim_steps
+        self.num_steps = ddim_steps if ddim_steps is not None else num_steps
         self.quat_convention = quat_convention
         self.use_both_arms = use_both_arms
         self.action_type = action_type
@@ -79,8 +81,7 @@ class NemoDiT:
             in_channels=train_args.get('action_dim', 20 if self.use_both_arms else 10),
             future_action_window_size=train_args.get('future_action_window', 10),
             past_action_window_size=train_args.get('past_action_window', 0),
-            diffusion_steps=train_args.get('diffusion_steps', 100),
-            noise_schedule=train_args.get('noise_schedule', 'squaredcos_cap_v2'),
+            num_inference_steps=train_args.get('num_inference_steps', 10),
             use_vision_condition=True,
             vision_backbone_type=train_args.get('vision_backbone', 'resnet50'),
             vision_pretrained=False,  # 不需要预训练权重，我们会加载训练好的
@@ -261,11 +262,11 @@ class NemoDiT:
         # Prepare state for conditioning: (1, action_dim)
         state = self._prepare_state_input()
 
-        # 使用 model.sample() 进行推理，与 eval.py 一致
+        # 使用 model.sample() 进行推理 (Flow Matching Euler 积分)
         action_pred = self.model.sample(
             images,
             state=state,
-            ddim_steps=self.ddim_steps,
+            num_steps=self.num_steps,
             cfg_scale=1.0,  # 无 classifier-free guidance
             return_all=False  # 只返回 n_action_steps 步
         )  # (1, n_action_steps, action_dim)
@@ -305,11 +306,11 @@ class NemoDiT:
         # Prepare state for conditioning: (1, action_dim)
         state = self._prepare_state_input()
 
-        # 使用 model.sample() 进行推理，截取 n_action_steps 步用于执行
+        # 使用 model.sample() 进行推理 (Flow Matching Euler 积分)
         action_pred = self.model.sample(
             images,
             state=state,
-            ddim_steps=self.ddim_steps,
+            num_steps=self.num_steps,
             cfg_scale=1.0,  # 无 classifier-free guidance
             return_all=False  # 只返回 n_action_steps 步
         )  # (1, n_action_steps, action_dim)
