@@ -66,6 +66,14 @@ num_cameras=4                 # Number of camera views
 head_camera_type="D435"       # Head camera type
 
 # ============================================================================
+# WandB Configuration
+# ============================================================================
+use_wandb="--use_wandb"                  # Set to "--use_wandb" to enable WandB logging
+wandb_project="robotwin_nemodit" # WandB project name
+wandb_entity=""               # WandB entity (username or team name)
+                              # Leave empty to use your default entity
+
+# ============================================================================
 # Setup
 # ============================================================================
 
@@ -118,6 +126,9 @@ python train.py \
     --lr ${lr} \
     --weight_decay ${weight_decay} \
     --grad_clip ${grad_clip} \
+    ${use_wandb} \
+    --wandb_project ${wandb_project} \
+    --wandb_entity ${wandb_entity} \
     --num_workers ${num_workers} \
     --checkpoint_dir ${checkpoint_dir} \
     --save_every ${save_every} \
