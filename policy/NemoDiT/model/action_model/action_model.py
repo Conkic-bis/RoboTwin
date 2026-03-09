@@ -2,6 +2,7 @@ from model.action_model.models import DiT
 from model.action_model import create_diffusion
 from . import gaussian_diffusion as gd
 from model.vision_input import VisionBackbone
+from model.feature_adaptation import create_feature_adapter
 import torch
 from torch import nn
 
@@ -99,13 +100,21 @@ class ActionModel(nn.Module):
             )
 
             vision_feature_dim = self.vision_backbone.get_output_dim()
-            condition_dim = vision_feature_dim  # 直接使用原生视觉特征维度，避免 adapter 信息损失
+
+            # Create feature adapter to project vision features to token_size
+            self.feature_adapter = create_feature_adapter(
+                adapter_type=adapter_type,
+                vision_feature_dim=vision_feature_dim,
+                dit_hidden_size=token_size,
+                num_layers=2,
+                dropout=0.1
+            )
         else:
             self.vision_backbone = None
-            condition_dim = token_size  # 无视觉条件时回退到 token_size
+            self.feature_adapter = None
 
         self.net = DiT_models[model_type](
-            token_size=condition_dim,
+            token_size=token_size,
             in_channels=in_channels,
             class_dropout_prob=class_dropout_prob,
             learn_sigma=learn_sigma,
@@ -121,22 +130,25 @@ class ActionModel(nn.Module):
         - 多帧聚合: 根据 temporal_agg 参数选择聚合方式 ('last', 'mean', 'concat')
         - ResNet: 通过 Global Average Pooling 提取全局特征
         - ViT: 通过 [CLS] token 提取全局特征
-        - 原生视觉特征直接传入 DiT，由 z_embedder 一步投影到 hidden_size
+        - 多相机特征融合后投影到 token_size 维度
 
         Args:
             images: (batch_size, n_obs_steps, num_cameras, channels, height, width) - 多帧
                    or (batch_size, num_cameras, channels, height, width) - 单帧
 
         Returns:
-            vision_condition: (batch_size, 1, vision_feature_dim) - 原生视觉条件特征
+            vision_condition: (batch_size, 1, token_size) - 单个全局视觉条件
         """
         if not self.use_vision_condition:
             raise ValueError("Vision condition is not enabled")
 
-        # Extract vision features (已融合多相机), 直接返回原生特征
-        vision_features = self.vision_backbone(images)  # (B, 1, vision_feature_dim)
+        # Extract vision features (已融合多相机)
+        vision_features = self.vision_backbone(images)  # (B, 1, vision_dim)
 
-        return vision_features
+        # Adapt features to token_size
+        vision_condition = self.feature_adapter(vision_features)  # (B, 1, token_size)
+
+        return vision_condition
 
     # Given condition z, state and ground truth token x, compute loss
     def loss(self, x, z=None, images=None, state=None):
@@ -147,7 +159,7 @@ class ActionModel(nn.Module):
 
         Args:
             x: (batch_size, future_action_window_size - 1, in_channels) - ground truth actions (不含 state)
-            z: (batch_size, 1, vision_feature_dim) - precomputed vision condition (optional)
+            z: (batch_size, 1, token_size) - precomputed vision condition (optional)
             images: (batch_size, n_obs_steps, num_cameras, 3, H, W) - raw images (optional)
                    or (batch_size, num_cameras, 3, H, W) for single frame
             state: (batch_size, in_channels) - 机器人当前状态 (action[0])，无噪音
@@ -195,7 +207,7 @@ class ActionModel(nn.Module):
         从观测图像和当前状态生成动作序列 (推理/采样)。
 
         推理流程:
-        1. 编码视觉条件: images -> z (B, 1, vision_feature_dim)
+        1. 编码视觉条件: images -> z (B, 1, token_size)
         2. 从高斯噪声开始，通过 DDIM 采样生成动作序列 (future_action_window - 1 帧)
         3. 截取前 n_action_steps 步动作用于执行
 
@@ -216,7 +228,7 @@ class ActionModel(nn.Module):
         batch_size = images.shape[0]
 
         # 1. 编码视觉条件
-        z = self.encode_vision_condition(images)  # (B, 1, vision_feature_dim)
+        z = self.encode_vision_condition(images)  # (B, 1, token_size)
 
         # 2. 准备采样器
         if use_ddim:

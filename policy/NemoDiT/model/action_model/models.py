@@ -324,8 +324,8 @@ class DiT(nn.Module):
             x: (N, T, in_channels) - noisy action sequence to denoise
                T = future_action_window_size - 1 (state 不参与去噪)
             t: (N,) - diffusion timesteps
-            z: (N, 1, vision_feature_dim) - 原生视觉条件特征 (无 adapter 投影)
-               通过 ResNet GAP 或 ViT CLS token 得到的全局视觉特征，由 z_embedder 直接投影到 hidden_size
+            z: (N, 1, token_size) - vision condition (single global feature)
+               通过 ResNet GAP 或 ViT CLS token 得到的全局视觉特征
             state: (N, in_channels) - 机器人当前状态 (n_obs_steps 最后一帧的动作值)
                    作为无噪音的条件 token
 
