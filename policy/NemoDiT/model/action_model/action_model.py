@@ -8,7 +8,7 @@ from torch import nn
 
 # 生成动作模型（根据默认DiT尺寸）
 def DiT_S(**kwargs):
-    return DiT(depth=6, hidden_size=384, num_heads=4, **kwargs)
+    return DiT(depth=12, hidden_size=384, num_heads=4, **kwargs)
 
 
 def DiT_B(**kwargs):
