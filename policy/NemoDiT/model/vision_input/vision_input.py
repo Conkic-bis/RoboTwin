@@ -120,158 +120,94 @@ class VisionBackbone(nn.Module):
 
         return model, feature_dim
 
-    def extract_resnet_features(self, x: torch.Tensor) -> torch.Tensor:
+    def _backbone_forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Extract global features from ResNet using Global Average Pooling.
-
-        ResNet 通过层级卷积提取特征，最终使用全局平均池化得到单个全局特征向量。
-        不同于 ViT 的 patch-based attention，ResNet 的特征是层级聚合的结果。
+        统一的 backbone forward，支持 batch 并行。
 
         Args:
-            x: (batch_size, channels, height, width)
+            x: (N, C, H, W) - N 可以是 B * n_frames * num_cameras
 
         Returns:
-            features: (batch_size, n_tokens, feature_dim) - ResNet patch 特征序列
+            features: (N, n_tokens, feature_dim)
+                - ResNet: n_tokens = H' * W' (spatial feature vectors)
+                - ViT: n_tokens = 1 (CLS token)
         """
-        features = self.backbone(x)  # (B, C, H, W) e.g., (B, 2048, 7, 7)
-
-        # print(f"ResNet features shape: {features.shape}")
-
-        batch_size, channels, height, width = features.shape
-        features = features.permute(0, 2, 3, 1).reshape(batch_size, height * width, channels)
-
-        # print(f"ResNet patch features shape: {features.shape}")
-
+        if 'resnet' in self.backbone_type:
+            features = self.backbone(x)  # (N, feat_dim, H', W')
+            N, channels, H, W = features.shape
+            features = features.permute(0, 2, 3, 1).reshape(N, H * W, channels)
+        else:  # ViT
+            x = self.backbone._process_input(x)
+            n = x.shape[0]
+            batch_class_token = self.backbone.class_token.expand(n, -1, -1)
+            x = torch.cat([batch_class_token, x], dim=1)
+            x = self.backbone.encoder(x)  # (N, num_patches+1, feature_dim)
+            features = x[:, 0:1, :]  # (N, 1, feature_dim) - CLS token
         return features
-
-    def extract_vit_features(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Extract global features from ViT using [CLS] token.
-
-        ViT 通过 patch embedding 和 self-attention 提取特征。
-        [CLS] token 通过与所有 patch tokens 的 attention 聚合了全局信息，
-        可作为整张图像的全局表示。
-
-        Args:
-            x: (batch_size, channels, height, width)
-
-        Returns:
-            features: (batch_size, 1, feature_dim) - CLS token 作为全局特征
-        """
-        # Forward through ViT encoder
-        x = self.backbone._process_input(x)
-        n = x.shape[0]
-
-        # Expand the class token to the full batch
-        batch_class_token = self.backbone.class_token.expand(n, -1, -1)
-        x = torch.cat([batch_class_token, x], dim=1)
-
-        x = self.backbone.encoder(x)  # (B, num_patches+1, feature_dim)
-
-        # 只取 [CLS] token (index 0) 作为全局表示
-        cls_token = x[:, 0:1, :]  # (B, 1, feature_dim)
-
-        return cls_token
-
-    def _extract_single_frame_features(self, images: torch.Tensor) -> torch.Tensor:
-        """
-        Extract features from a single frame (multiple cameras).
-
-        Args:
-            images: (batch_size, num_cameras, C, H, W)
-
-        Returns:
-            features: (batch_size, n_tokens, feature_dim) - 融合后的单帧特征
-        """
-        batch_size, num_cams, C, H, W = images.shape
-
-        # Process each camera view
-        all_features = []
-        for cam_idx in range(num_cams):
-            cam_image = images[:, cam_idx]  # (B, C, H, W)
-
-            # Extract features based on backbone type
-            # 两种 backbone 都输出 (B, n_tokens, feature_dim)
-            if 'resnet' in self.backbone_type:
-                features = self.extract_resnet_features(cam_image)  # (B, n_tokens, feature_dim)
-            else:  # ViT
-                features = self.extract_vit_features(cam_image)  # (B, n_tokens, feature_dim)
-
-            all_features.append(features)
-
-        # Aggregate features from multiple cameras
-        # 更改feature_dim * num_cameras融合方式，替换原来的压缩一维变量
-        if num_cams > 1:
-            if all_features[0].shape[1] == 1:
-                frame_embeds = torch.cat(all_features, dim=2)  # (B, 1, feature_dim * num_cameras)
-                frame_embeds = self.camera_fusion(frame_embeds)  # (B, 1, feature_dim)
-            else:
-                frame_embeds = torch.cat(all_features, dim=1)  # (B, n_tokens * num_cameras, feature_dim)
-        else:
-            frame_embeds = all_features[0]  # (B, n_tokens, feature_dim)
-
-        return frame_embeds
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through vision backbone.
 
-        支持多帧观测输入，提取多相机视觉特征并融合为单个全局表示。
+        将多帧、多相机全部 reshape 进 batch 维度，一次 backbone forward 完成，
+        避免 for 循环串行调用，充分利用 GPU 并行。
 
         输入格式:
         - 多帧多相机: (B, n_obs_steps, num_cameras, C, H, W)
         - 单帧多相机: (B, num_cameras, C, H, W)
         - 单帧单相机: (B, C, H, W)
 
-        处理流程:
-        1. 对每帧提取多相机特征并融合: (B, n_tokens, feature_dim)
-        2. 时间聚合 (temporal_agg):
-           - 'last': 只用最后一帧
-           - 'mean': 所有帧取平均
-           - 'concat': 拼接后投影
-
-        Args:
-            images: (B, n_obs_steps, num_cameras, C, H, W) - 多帧多相机
-                   or (B, num_cameras, C, H, W) - 单帧多相机
-                   or (B, C, H, W) - 单帧单相机
-
         Returns:
             image_embeds: (B, n_tokens, feature_dim) - 统一的视觉特征序列
         """
         # Normalize input to (B, n_obs_steps, num_cameras, C, H, W)
         if images.dim() == 4:
-            # (B, C, H, W) -> (B, 1, 1, C, H, W)
             images = images.unsqueeze(1).unsqueeze(1)
         elif images.dim() == 5:
-            # (B, num_cameras, C, H, W) -> (B, 1, num_cameras, C, H, W)
             images = images.unsqueeze(1)
-        # Now images is (B, n_obs_steps, num_cameras, C, H, W)
 
         batch_size, n_frames, num_cams, C, H, W = images.shape
 
-        # Extract features for each frame
-        frame_features = []
-        for t in range(n_frames):
-            frame_images = images[:, t]  # (B, num_cameras, C, H, W)
-            frame_feat = self._extract_single_frame_features(frame_images)  # (B, 1, feature_dim)
-            frame_features.append(frame_feat)
+        # ========== 将 (B, T, K, C, H, W) reshape 为 (B*T*K, C, H, W) 一次性 forward ==========
+        flat_images = images.reshape(batch_size * n_frames * num_cams, C, H, W)
+        flat_features = self._backbone_forward(flat_images)  # (B*T*K, n_tokens_per_cam, feat_dim)
+        n_tokens_per_cam = flat_features.shape[1]
+        feat_dim = flat_features.shape[2]
 
-        # Temporal aggregation
+        # Reshape back: (B, T, K, n_tokens_per_cam, feat_dim)
+        all_features = flat_features.reshape(batch_size, n_frames, num_cams, n_tokens_per_cam, feat_dim)
+
+        # ========== 多相机融合 (沿 K 维度) ==========
+        if num_cams > 1:
+            if n_tokens_per_cam == 1:
+                # ViT CLS: 在 feature 维度 concat 后 linear 融合
+                # (B, T, K, 1, feat_dim) -> (B, T, 1, feat_dim * K)
+                cam_features = all_features.squeeze(3)  # (B, T, K, feat_dim)
+                cam_features = cam_features.reshape(batch_size, n_frames, 1, feat_dim * num_cams)
+                cam_features = self.camera_fusion(cam_features)  # (B, T, 1, feat_dim)
+            else:
+                # ResNet spatial: 在 token 维度 concat
+                # (B, T, K, n_tokens_per_cam, feat_dim) -> (B, T, K * n_tokens_per_cam, feat_dim)
+                cam_features = all_features.reshape(batch_size, n_frames, num_cams * n_tokens_per_cam, feat_dim)
+        else:
+            cam_features = all_features.squeeze(2)  # (B, T, n_tokens_per_cam, feat_dim)
+
+        # cam_features: (B, T, n_tokens, feat_dim)
+        # n_tokens = K * n_tokens_per_cam (ResNet) 或 1 (ViT)
+
+        # ========== 时间聚合 (沿 T 维度) ==========
         if n_frames == 1:
-            # 单帧情况，直接返回
-            image_embeds = frame_features[0]  # (B, 1, feature_dim)
+            image_embeds = cam_features[:, 0]  # (B, n_tokens, feat_dim)
         elif self.temporal_agg == 'last':
-            # 只使用最后一帧
-            image_embeds = frame_features[-1]  # (B, 1, feature_dim)
+            image_embeds = cam_features[:, -1]  # (B, n_tokens, feat_dim)
         elif self.temporal_agg == 'mean':
-            # 对所有帧取平均
-            stacked = torch.stack(frame_features, dim=1)  # (B, n_frames, n_tokens, feature_dim)
-            image_embeds = stacked.mean(dim=1)  # (B, n_tokens, feature_dim)
+            image_embeds = cam_features.mean(dim=1)  # (B, n_tokens, feat_dim)
         elif self.temporal_agg == 'concat':
-            # 拼接所有帧特征后投影
-            # frame_features: List of (B, n_tokens, feature_dim)
-            concat_feat = torch.cat(frame_features, dim=-1)  # (B, n_tokens, feature_dim * n_frames)
-            image_embeds = self.temporal_fusion(concat_feat)  # (B, n_tokens, feature_dim)
+            # (B, T, n_tokens, feat_dim) -> (B, n_tokens, feat_dim * T)
+            image_embeds = cam_features.permute(0, 2, 1, 3).reshape(
+                batch_size, cam_features.shape[2], feat_dim * n_frames
+            )
+            image_embeds = self.temporal_fusion(image_embeds)  # (B, n_tokens, feat_dim)
         else:
             raise ValueError(f"Unknown temporal_agg: {self.temporal_agg}")
 
@@ -284,24 +220,24 @@ class VisionBackbone(nn.Module):
 
 # Example usage and testing
 if __name__ == "__main__":
-    # Test ResNet50 with single frame
-    print("Testing ResNet50 backbone (single frame)...")
+    # ResNet50 + 224x224: backbone outputs (B, 2048, 7, 7) -> 7*7=49 spatial tokens per camera
+    # 4 cameras -> 4*49=196 tokens (concat on token dim)
+
+    # Test ResNet50 with single frame, 4 cameras
+    print("Testing ResNet50 backbone (single frame, 4 cameras)...")
     resnet_backbone = VisionBackbone(
         backbone_type='resnet50',
         pretrained=False,
         num_cameras=4,
         freeze_backbone=False
     )
-
-    # Test with 4 camera views, single frame
-    dummy_images = torch.randn(2, 4, 3, 224, 224)  # (batch_size=2, 4 cameras, RGB, 224x224)
+    dummy_images = torch.randn(2, 4, 3, 224, 224)
     output = resnet_backbone(dummy_images)
-    print(f"ResNet50 output shape: {output.shape}")  # Expected: (2, 1, 2048)
-    print(f"Feature dimension: {resnet_backbone.get_output_dim()}")
-    assert output.shape == (2, 1, 2048), f"Expected (2, 1, 2048), got {output.shape}"
+    print(f"ResNet50 output shape: {output.shape}")  # (2, 196, 2048)
+    assert output.shape == (2, 4 * 49, 2048), f"Expected (2, 196, 2048), got {output.shape}"
 
     # Test with multi-frame input
-    print("\nTesting ResNet50 backbone (multi-frame, n_obs_steps=3)...")
+    print("\nTesting ResNet50 backbone (multi-frame, n_obs_steps=3, mean)...")
     resnet_multi = VisionBackbone(
         backbone_type='resnet50',
         pretrained=False,
@@ -310,10 +246,10 @@ if __name__ == "__main__":
         n_obs_steps=3,
         temporal_agg='mean'
     )
-    multi_frame_images = torch.randn(2, 3, 4, 3, 224, 224)  # (B, n_obs_steps, num_cameras, C, H, W)
+    multi_frame_images = torch.randn(2, 3, 4, 3, 224, 224)
     output = resnet_multi(multi_frame_images)
-    print(f"Multi-frame output shape: {output.shape}")  # Expected: (2, 1, 2048)
-    assert output.shape == (2, 1, 2048), f"Expected (2, 1, 2048), got {output.shape}"
+    print(f"Multi-frame output shape: {output.shape}")  # (2, 196, 2048)
+    assert output.shape == (2, 4 * 49, 2048), f"Expected (2, 196, 2048), got {output.shape}"
 
     # Test temporal_agg='concat'
     print("\nTesting temporal_agg='concat'...")
@@ -327,25 +263,23 @@ if __name__ == "__main__":
     )
     two_frame_images = torch.randn(2, 2, 4, 3, 224, 224)
     output = resnet_concat(two_frame_images)
-    print(f"Concat output shape: {output.shape}")  # Expected: (2, 1, 2048)
-    assert output.shape == (2, 1, 2048), f"Expected (2, 1, 2048), got {output.shape}"
+    print(f"Concat output shape: {output.shape}")  # (2, 196, 2048)
+    assert output.shape == (2, 4 * 49, 2048), f"Expected (2, 196, 2048), got {output.shape}"
 
-    # Test ViT
-    print("\nTesting ViT-B/16 backbone...")
+    # Test ViT: CLS token per camera, 4 cameras -> fusion -> (B, 1, 768)
+    print("\nTesting ViT-B/16 backbone (4 cameras)...")
     vit_backbone = VisionBackbone(
         backbone_type='vit_b_16',
         pretrained=False,
         num_cameras=4,
         freeze_backbone=False
     )
-
     output = vit_backbone(dummy_images)
-    print(f"ViT-B/16 output shape: {output.shape}")  # Expected: (2, 1, 768)
-    print(f"Feature dimension: {vit_backbone.get_output_dim()}")
+    print(f"ViT-B/16 output shape: {output.shape}")  # (2, 1, 768)
     assert output.shape == (2, 1, 768), f"Expected (2, 1, 768), got {output.shape}"
 
-    # Test single camera
-    print("\nTesting single camera...")
+    # Test single camera ResNet
+    print("\nTesting single camera ResNet50...")
     single_cam_backbone = VisionBackbone(
         backbone_type='resnet50',
         pretrained=False,
@@ -354,7 +288,7 @@ if __name__ == "__main__":
     )
     single_cam_images = torch.randn(2, 1, 3, 224, 224)
     output = single_cam_backbone(single_cam_images)
-    print(f"Single camera output shape: {output.shape}")  # Expected: (2, 1, 2048)
-    assert output.shape == (2, 1, 2048), f"Expected (2, 1, 2048), got {output.shape}"
+    print(f"Single camera output shape: {output.shape}")  # (2, 49, 2048)
+    assert output.shape == (2, 49, 2048), f"Expected (2, 49, 2048), got {output.shape}"
 
-    print("\nVision backbone tests passed!")
+    print("\nAll vision backbone tests passed!")
