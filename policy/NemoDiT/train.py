@@ -12,6 +12,7 @@ from pathlib import Path
 from model.action_model.action_model import ActionModel
 from dataloader import RobotDataset
 from utils.wandb_utils import WandbLogger
+from utils.ema_model import EMAModel
 
 
 def parse_args():
@@ -127,6 +128,18 @@ def parse_args():
     parser.add_argument('--warmup_type', type=str, default='linear',
                         choices=['linear', 'cosine'],
                         help='Warmup schedule type (default: linear)')
+
+    # EMA (Exponential Moving Average) 参数
+    # EMA 通过维护模型参数的指数移动平均来提高推理稳定性
+    # 参考: RoboticsDiffusionTransformer / DiffusionPolicy
+    parser.add_argument('--use_ema', action='store_true', default=False,
+                        help='Use Exponential Moving Average for model weights (default: False)')
+    parser.add_argument('--ema_inv_gamma', type=float, default=1.0,
+                        help='EMA inverse gamma for warmup schedule (default: 1.0)')
+    parser.add_argument('--ema_power', type=float, default=0.6667,
+                        help='EMA power for warmup schedule (default: 2/3)')
+    parser.add_argument('--ema_max_value', type=float, default=0.9999,
+                        help='Maximum EMA decay rate (default: 0.9999)')
 
     # Checkpoint arguments
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints',
@@ -275,7 +288,7 @@ def get_warmup_cosine_scheduler(optimizer, warmup_epochs, total_epochs, warmup_t
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, args, filename=None):
+def save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, args, filename=None, ema_model=None):
     """Save training checkpoint."""
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -299,6 +312,10 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, arg
     if scaler is not None:
         checkpoint['scaler_state_dict'] = scaler.state_dict()
 
+    # 保存 EMA 状态 (如果使用)
+    if ema_model is not None:
+        checkpoint['ema_state_dict'] = ema_model.state_dict()
+
     torch.save(checkpoint, checkpoint_path)
     print(f"Checkpoint saved: {checkpoint_path}")
 
@@ -307,7 +324,7 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step, arg
     torch.save(checkpoint, latest_path)
 
 
-def load_checkpoint(model, optimizer, scheduler, scaler, checkpoint_path):
+def load_checkpoint(model, optimizer, scheduler, scaler, checkpoint_path, ema_model=None):
     """Load training checkpoint."""
 
     print(f"Loading checkpoint from: {checkpoint_path}")
@@ -323,6 +340,11 @@ def load_checkpoint(model, optimizer, scheduler, scaler, checkpoint_path):
     # 加载 AMP scaler 状态 (如果存在且正在使用)
     if scaler is not None and 'scaler_state_dict' in checkpoint:
         scaler.load_state_dict(checkpoint['scaler_state_dict'])
+
+    # 加载 EMA 状态 (如果存在且正在使用)
+    if ema_model is not None and 'ema_state_dict' in checkpoint:
+        ema_model.load_state_dict(checkpoint['ema_state_dict'])
+        print(f"EMA model restored (decay={ema_model.decay:.6f}, step={ema_model.optimization_step})")
 
     epoch = checkpoint['epoch']
     global_step = checkpoint['global_step']
@@ -416,11 +438,23 @@ def train():
     if args.use_amp:
         print("Using Automatic Mixed Precision (AMP) training")
 
+    # EMA (Exponential Moving Average)
+    ema_model = None
+    if args.use_ema:
+        ema_model = EMAModel(
+            model,
+            inv_gamma=args.ema_inv_gamma,
+            power=args.ema_power,
+            max_value=args.ema_max_value,
+        )
+        print(f"Using EMA (inv_gamma={args.ema_inv_gamma}, power={args.ema_power}, "
+              f"max_value={args.ema_max_value})")
+
     # Resume from checkpoint if specified
     start_epoch = 0
     global_step = 0
     if args.resume is not None:
-        start_epoch, global_step = load_checkpoint(model, optimizer, scheduler, scaler, args.resume)
+        start_epoch, global_step = load_checkpoint(model, optimizer, scheduler, scaler, args.resume, ema_model)
 
     # Training loop
     print("Starting training...")
@@ -465,18 +499,25 @@ def train():
 
                 optimizer.step()
 
+            # Update EMA model
+            if ema_model is not None:
+                ema_model.step(model)
+
             # Update metrics
             epoch_loss += loss.item()
             global_step += 1
 
             # Log to WandB
             if wandb_logger:
-                wandb_logger.log({
+                log_dict = {
                     'train/loss': loss.item(),
                     'train/lr': optimizer.param_groups[0]["lr"],
                     'train/epoch': epoch + 1,
-                    'train/global_step': global_step
-                }, step=global_step)
+                    'train/global_step': global_step,
+                }
+                if ema_model is not None:
+                    log_dict['train/ema_decay'] = ema_model.decay
+                wandb_logger.log(log_dict, step=global_step)
 
             # Update progress bar
             progress_bar.set_postfix({
@@ -494,11 +535,11 @@ def train():
 
         # Save checkpoint
         if (epoch + 1) % args.save_every == 0:
-            save_checkpoint(model, optimizer, scheduler, scaler, epoch + 1, global_step, args)
+            save_checkpoint(model, optimizer, scheduler, scaler, epoch + 1, global_step, args, ema_model=ema_model)
 
     # Save final checkpoint
     print("Training completed!")
-    save_checkpoint(model, optimizer, scheduler, scaler, args.epochs, global_step, args, filename='final.pt')
+    save_checkpoint(model, optimizer, scheduler, scaler, args.epochs, global_step, args, filename='final.pt', ema_model=ema_model)
 
     if wandb_logger:
         wandb_logger.finish()
