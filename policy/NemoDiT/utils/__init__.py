@@ -7,6 +7,7 @@ from .rotation_utils import (
     convert_endpose_7d_to_9d,
     EndEffectorPose,
 )
+from .ema_model import EMAModel
 
 __all__ = [
     "quaternion_to_rotation_matrix",
@@ -16,4 +17,5 @@ __all__ = [
     "convert_pose_quat_to_rot6d",
     "convert_endpose_7d_to_9d",
     "EndEffectorPose",
+    "EMAModel",
 ]
