@@ -16,7 +16,9 @@ import torch
 import torch.nn as nn
 import math
 import torch.nn.functional as F
-from timm.models.vision_transformer import Attention, Mlp, use_fused_attn
+from timm.models.vision_transformer import Attention, Mlp, use_fused_attn, RmsNorm
+from typing import Optional
+from torch.jit import Final
 
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
@@ -135,51 +137,123 @@ class StateEmbedder(nn.Module):
 #                          Cross Attention Layers                               #
 #################################################################################
 class CrossAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = False, qk_norm: bool = False, attn_drop: float = 0, proj_drop: float = 0, norm_layer: nn.Module = nn.LayerNorm,) -> None:
+    """
+    A cross-attention layer with flash attention.
+    
+    Paper:
+    https://arxiv.org/abs/1706.03762
+    
+    Reference:
+    https://github.com/meta-llama/llama3/blob/main/llama/model.py
+    """
+    fused_attn: Final[bool]
+    def __init__(self, hidden_size: int, num_heads: int = 8, n_kv_heads = None, norm_eps: float = 1e-6, qkv_bias: bool = False, qk_norm: bool = False, attn_drop: float = 0, proj_drop: float = 0,) -> None:
         super().__init__()
-        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        assert hidden_size % num_heads == 0, 'hidden_size should be divisible by num_heads'
+        self.n_heads = num_heads
+        self.n_kv_heads = self.n_heads if n_kv_heads is None else n_kv_heads
+        if self.n_heads % self.n_kv_heads != 0:
+            raise ValueError('num_heads should be divisible by num_kv_heads')
+        self.n_rep = self.n_heads // self.n_kv_heads
+        self.hidden_size = hidden_size
+        if self.hidden_size % self.n_heads != 0:
+            raise ValueError('hidden_size should be divisible by num_heads')
+        self.head_size = self.hidden_size // self.n_heads
+
+        self.wq = nn.Linear(
+            self.hidden_size, 
+            self.n_heads * self.head_size, 
+            bias=False
+        )
+        self.wkv = nn.Linear(
+            self.hidden_size, 
+            self.n_kv_heads * self.head_size * 2, 
+            bias=False
+        )
+        self.wo = nn.Linear(
+            self.n_heads * self.head_size, 
+            self.hidden_size, 
+            bias=False
+        )
+
+        self.norm_eps = norm_eps
+        self.norm_q = RmsNorm(self.head_size, eps=self.norm_eps)
+        self.norm_k = RmsNorm(self.head_size, eps=self.norm_eps)
+
         self.fused_attn = use_fused_attn()
 
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)
-        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
-        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
+        self.attn_scale = 1.0 / math.sqrt(self.head_size)
 
-    def forward(self, x: torch.Tensor, z: torch.Tensor, context=None) -> torch.Tensor:
-        B, N, C = x.shape
-        _, L, _ = z.shape
+    def forward(
+        self,
+        x: torch.Tensor,
+        c: Optional[torch.Tensor] = None,
+        ck: Optional[torch.Tensor] = None,
+        cv: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+    ):
+        bs, seq_len, _ = x.shape   # (bs, seq_len, hidden_size), batch size, sequence length, hidden size
         
-        q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        kv = self.kv(z).reshape(B, L, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        k, v = kv.unbind(0)
-        q, k = self.q_norm(q), self.k_norm(k)
+        xq = self.wq(x)
+        xq = xq.view(bs, seq_len, self.n_heads, self.head_size)
+        xq = self.norm_q(xq)
+
+        if c is not None:
+            _, c_len, _ = c.shape     # (bs, c_len, hidden_size), batch size, condition length, hidden size
+
+            ckv = self.wkv(c)
+            ckv = ckv.view(bs, c_len, self.n_kv_heads, self.head_size, 2)
+            ck, cv = ckv.unbind(-1)
+
+            ck = self.norm_k(ck)
+
+        # Repeat k/v heads if n_kv_heads < n_heads
+        ck = repeat_kv(
+            ck, self.n_rep
+        )  # (bs, c_len, n_heads, head_size)
+        cv = repeat_kv(
+            cv, self.n_rep
+        )  # (bs, c_len, n_heads, head_size)
+
+        xq = xq.transpose(1, 2)  # (bs, n_heads, seq_len, head_size)
+        ck = ck.transpose(1, 2)  # (bs, n_heads, c_len, head_size)
+        cv = cv.transpose(1, 2)  # (bs, n_heads, c_len, head_size)
+
+        # Prepare attn mask (bs, c_len) to mask the condition
+        if mask is not None:
+            mask = mask.reshape(bs, 1, 1, -1)
+            mask = mask.expand(-1, -1, seq_len, -1)
 
         if self.fused_attn:
-            x = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                dropout_p=self.attn_drop.p if self.training else 0.,
+            output = F.scaled_dot_product_attention(
+                query=xq,
+                key=ck,
+                value=cv,
+                attn_mask=mask,
+                dropout_p=0.0,
+                is_causal=False,
+                scale=self.attn_scale,
             )
         else:
-            q = q * self.scale
-            attn = q @ k.transpose(-2, -1)
-            attn = attn.softmax(dim=-1)
-            if self.attn_drop.p > 0:
-                attn = self.attn_drop(attn)
-            x = attn @ v
-            
-        x = x.permute(0, 2, 1, 3).reshape(B, N, C)
-        x = self.proj(x)
-        if self.proj_drop.p > 0:
-            x = self.proj_drop(x)
+            scores = torch.matmul(xq, ck.transpose(2, 3)) * self.attn_scale
+            if mask is not None:
+                attn = attn.masked_fill_(mask.logical_not(), float('-inf'))
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            output = torch.matmul(scores, cv)   # (bs, n_heads, seq_len, head_size)
+
+        output = output.transpose(1, 2).contiguous().view(bs, seq_len, -1)
+        return self.wo(output)
+
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
+    bs, slen, n_kv_heads, head_dim = x.shape
+    if n_rep == 1:
         return x
+    return (
+        x[:, :, :, None, :]
+        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+    )
     
 #################################################################################
 #                                 Core DiT Model                                #
@@ -191,11 +265,11 @@ class DiTBlock(nn.Module):
     """
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, **block_kwargs):
         super().__init__()
-        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm1 = RmsNorm(hidden_size, eps=1e-6)
         self.attn = Attention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
-        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm2 = RmsNorm(hidden_size, eps=1e-6)
         self.cross_attn = CrossAttention(hidden_size, num_heads=num_heads, qkv_bias=True, **block_kwargs)
-        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm3 = RmsNorm(hidden_size, eps=1e-6)
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = Mlp(in_features=hidden_size, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
@@ -213,7 +287,7 @@ class FinalLayer(nn.Module):
     """
     def __init__(self, hidden_size, out_channels):
         super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm_final = RmsNorm(hidden_size, eps=1e-6)
         self.linear = nn.Linear(hidden_size, out_channels, bias=True)
 
     def forward(self, x):
@@ -324,8 +398,8 @@ class DiT(nn.Module):
             x: (N, T, in_channels) - noisy action sequence to denoise
                T = future_action_window_size - 1 (state 不参与去噪)
             t: (N,) - diffusion timesteps
-            z: (N, 1, token_size) - vision condition (single global feature)
-               通过 ResNet GAP 或 ViT CLS token 得到的全局视觉特征
+            z: (N, 1, vision_feature_dim) - 原生视觉条件特征 (无 adapter 投影)
+               通过 ResNet GAP 或 ViT CLS token 得到的全局视觉特征，由 z_embedder 直接投影到 hidden_size
             state: (N, in_channels) - 机器人当前状态 (n_obs_steps 最后一帧的动作值)
                    作为无噪音的条件 token
 
@@ -340,9 +414,9 @@ class DiT(nn.Module):
         t = t.unsqueeze(1)                                  # (N, 1, D)
 
 
-        s = self.state_embedder(state)                  # (N, D)
-        s = s.unsqueeze(1)                              # (N, 1, D)
-        x = torch.cat((t, s, x), dim=1)                # (N, 1+1+T, D) = (N, T+2, D)
+        s = self.state_embedder(state)                      # (N, D)
+        s = s.unsqueeze(1)                                  # (N, 1, D)
+        x = torch.cat((t, s, x), dim=1)                     # (N, 1+1+T, D) = (N, T+2, D)
 
         x = x + self.positional_embedding                   # (N, T+1+1, D)
         for block in self.blocks:
