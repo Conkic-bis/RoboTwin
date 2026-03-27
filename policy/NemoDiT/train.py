@@ -93,20 +93,15 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate (default: 1e-4)')
 
-    # weight_decay: 权重衰减系数，用于L2正则化防止过拟合
-    # AdamW默认建议0.01，可根据数据集大小调整
-    # 数据集小时可适当增大（0.01-0.1），数据集大时可减小（0.0-0.01）
+
     parser.add_argument('--weight_decay', type=float, default=0.01,
                         help='Weight decay for L2 regularization (default: 0.01)')
 
-    # grad_clip: 梯度裁剪的最大范数，防止梯度爆炸
-    # 通常设置为1.0，如果训练不稳定可尝试减小到0.5
+
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping max norm (default: 1.0)')
 
-    # num_workers: 数据加载的并行工作进程数
-    # 建议设置为CPU核心数的一半，最多不超过8
-    # 设置过高可能导致内存问题和进程间通信开销
+
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers (default: 4)')
 
