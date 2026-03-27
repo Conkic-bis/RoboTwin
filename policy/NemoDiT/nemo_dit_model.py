@@ -72,7 +72,6 @@ class NemoDiT:
               f"n_action_steps={train_args.get('n_action_steps', 'N/A')}, "
               f"future_action_window={train_args.get('future_action_window', 'N/A')}")
 
-        # 使用训练时保存的完整参数创建模型
         model = ActionModel(
             token_size=train_args.get('token_size', 2048),
             model_type=train_args.get('model_type', 'DiT-B'),

@@ -23,7 +23,7 @@ instruction_type: unseen
 
 # Checkpoint settings
 expert_data_num: 100
-checkpoint_num: 600
+checkpoint_num: 500
 
 # Camera configuration
 head_camera_type: D435
@@ -49,7 +49,7 @@ n_action_steps: 8          # Number of action steps to execute per inference
                             # Should be <= future_action_window from training
 
 # DDIM sampling settings
-ddim_steps: 100              # Number of DDIM denoising steps
+ddim_steps: 10              # Number of DDIM denoising steps
                             # Lower = faster but less accurate
                             # Higher = slower but more accurate
 

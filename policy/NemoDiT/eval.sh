@@ -1,8 +1,3 @@
-#!/bin/bash
-# ============================================================================
-# NemoDiT Policy Evaluation Script for RoboTwin
-# ============================================================================
-#
 # Usage:
 #   bash eval.sh ${task_name} ${task_config} ${ckpt_setting} ${expert_data_num} ${seed} ${gpu_id}
 #
@@ -30,7 +25,6 @@ expert_data_num=${4}
 seed=${5}
 gpu_id=${6}
 
-# Set GPU device
 export CUDA_VISIBLE_DEVICES=${gpu_id}
 
 # Print evaluation info

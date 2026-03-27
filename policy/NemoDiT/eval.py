@@ -1,17 +1,3 @@
-"""
-Evaluation/Inference script for DiT Action Model.
-
-使用训练好的模型进行推理，从观测图像生成动作序列。
-
-Usage:
-    python eval.py --checkpoint checkpoints/100.pt --data_path /path/to/data --num_samples 10
-
-推理流程:
-    1. 加载训练好的模型权重
-    2. 从数据集加载观测图像 (n_obs_steps 帧)
-    3. 使用 DDIM 采样生成 future_action_window_size 步动作
-    4. 截取前 n_action_steps 步动作用于执行
-"""
 import torch
 import argparse
 import numpy as np
@@ -82,11 +68,11 @@ def load_model(checkpoint_path, device):
         noise_schedule=train_args['noise_schedule'],
         use_vision_condition=True,
         vision_backbone_type=train_args['vision_backbone'],
-        vision_pretrained=False,  # 不需要预训练权重，我们会加载训练好的
+        vision_pretrained=False, 
         num_cameras=train_args['num_cameras'],
         freeze_vision_backbone=False,
         adapter_type=train_args['adapter_type'],
-        class_dropout_prob=0.0,  # 推理时关闭 dropout
+        class_dropout_prob=0.0, 
         n_obs_steps=train_args['n_obs_steps'],
         n_action_steps=train_args['n_action_steps'],
         temporal_agg=train_args['temporal_agg'],

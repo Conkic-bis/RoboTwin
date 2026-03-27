@@ -1,22 +1,3 @@
-"""
-deploy_policy.py
-
-RoboTwin Policy Interface for NemoDiT.
-
-This file provides the standard RoboTwin interface functions:
-- encode_obs: Process raw observations from the environment
-- get_model: Load and initialize the policy model
-- eval: Main evaluation loop
-- reset_model: Reset model state between episodes
-
-IMPORTANT: We strongly recommend keeping the code logic unchanged.
-           You can customize the implementation details within each function.
-
-Supported Action Types:
-- endpose: End-effector pose control (xyz + quaternion + gripper)
-- joint: Joint position control (6D joint + gripper)
-"""
-
 import numpy as np
 import yaml
 from typing import Dict, Any
