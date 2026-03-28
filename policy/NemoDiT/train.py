@@ -16,7 +16,7 @@ from utils.ema_model import EMAModel
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train DiT for robot action generation')
+    parser = argparse.ArgumentParser(description='Train Flow Matching DiT for robot action generation')
 
     # Data arguments
     parser.add_argument('--data_path', type=str, required=True,
@@ -79,11 +79,22 @@ def parse_args():
                         choices=['linear', 'mlp', 'attention_pooling'],
                         help='Feature adapter type')
 
-    # Diffusion arguments
-    parser.add_argument('--diffusion_steps', type=int, default=500,
-                        help='Number of diffusion steps (default: 500)')
-    parser.add_argument('--noise_schedule', type=str, default='squaredcos_cap_v2',
-                        help='Noise schedule type (default: squaredcos_cap_v2)')
+    # Flow Matching arguments
+    parser.add_argument('--time_sampling', type=str, default='logit_normal',
+                        choices=['logit_normal', 'beta', 'uniform'],
+                        help='Time sampling strategy: logit_normal (RDT-2), beta (GR00T), uniform')
+    parser.add_argument('--logit_normal_loc', type=float, default=0.0,
+                        help='LogisticNormal location parameter (default: 0.0)')
+    parser.add_argument('--logit_normal_scale', type=float, default=1.0,
+                        help='LogisticNormal scale parameter (default: 1.0)')
+    parser.add_argument('--beta_alpha', type=float, default=1.5,
+                        help='Beta distribution alpha for time sampling (default: 1.5)')
+    parser.add_argument('--beta_beta', type=float, default=1.0,
+                        help='Beta distribution beta for time sampling (default: 1.0)')
+    parser.add_argument('--num_timestep_buckets', type=int, default=1000,
+                        help='Number of timestep discretization buckets (default: 1000)')
+    parser.add_argument('--num_inference_steps', type=int, default=10,
+                        help='Number of Euler ODE steps for inference (default: 10)')
 
     # Training arguments 
     parser.add_argument('--batch_size', type=int, default=16,
@@ -234,8 +245,13 @@ def create_model(args):
         in_channels=args.action_dim,
         future_action_window_size=args.future_action_window,
         past_action_window_size=args.past_action_window,
-        diffusion_steps=args.diffusion_steps,
-        noise_schedule=args.noise_schedule,
+        # Flow matching parameters
+        time_sampling=args.time_sampling,
+        logit_normal_loc=args.logit_normal_loc,
+        logit_normal_scale=args.logit_normal_scale,
+        beta_alpha=args.beta_alpha,
+        beta_beta=args.beta_beta,
+        num_timestep_buckets=args.num_timestep_buckets,
         use_vision_condition=True,
         vision_backbone_type=args.vision_backbone,
         vision_pretrained=args.vision_pretrained,

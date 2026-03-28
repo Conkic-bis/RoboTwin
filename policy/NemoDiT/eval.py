@@ -10,7 +10,7 @@ from dataloader import RobotDataset
 
 def parse_args():
     """Parse command line arguments for evaluation."""
-    parser = argparse.ArgumentParser(description='Evaluate DiT Action Model')
+    parser = argparse.ArgumentParser(description='Evaluate Flow Matching DiT Action Model')
 
     # Checkpoint
     parser.add_argument('--checkpoint', type=str, required=True,
@@ -23,8 +23,8 @@ def parse_args():
                         help='Number of samples to evaluate (default: 5)')
 
     # Inference arguments
-    parser.add_argument('--ddim_steps', type=int, default=10,
-                        help='DDIM sampling steps (default: 10)')
+    parser.add_argument('--num_inference_steps', type=int, default=10,
+                        help='Euler ODE integration steps (default: 10)')
     parser.add_argument('--cfg_scale', type=float, default=1.0,
                         help='Classifier-free guidance scale (default: 1.0, no guidance)')
 
@@ -64,15 +64,20 @@ def load_model(checkpoint_path, device):
         in_channels=train_args['action_dim'],
         future_action_window_size=train_args['future_action_window'],
         past_action_window_size=train_args['past_action_window'],
-        diffusion_steps=train_args['diffusion_steps'],
-        noise_schedule=train_args['noise_schedule'],
+        # Flow matching parameters
+        time_sampling=train_args.get('time_sampling', 'logit_normal'),
+        logit_normal_loc=train_args.get('logit_normal_loc', 0.0),
+        logit_normal_scale=train_args.get('logit_normal_scale', 1.0),
+        beta_alpha=train_args.get('beta_alpha', 1.5),
+        beta_beta=train_args.get('beta_beta', 1.0),
+        num_timestep_buckets=train_args.get('num_timestep_buckets', 1000),
         use_vision_condition=True,
         vision_backbone_type=train_args['vision_backbone'],
-        vision_pretrained=False, 
+        vision_pretrained=False,
         num_cameras=train_args['num_cameras'],
         freeze_vision_backbone=False,
         adapter_type=train_args['adapter_type'],
-        class_dropout_prob=0.0, 
+        class_dropout_prob=0.0,
         n_obs_steps=train_args['n_obs_steps'],
         n_action_steps=train_args['n_action_steps'],
         temporal_agg=train_args['temporal_agg'],
@@ -144,11 +149,11 @@ def evaluate_sample(model, images, state, gt_actions, ddim_steps, cfg_scale, dev
     state = state.to(device)
     gt_actions = gt_actions.to(device)
 
-    # 推理生成动作 (with state conditioning)
+    # 推理生成动作 (Euler ODE with state conditioning)
     pred_actions = model.sample(
         images,
         state=state,
-        ddim_steps=ddim_steps,
+        num_steps=ddim_steps,
         cfg_scale=cfg_scale,
         return_all=False
     )  # (1, n_action_steps, action_dim)
@@ -194,11 +199,11 @@ model, train_args = load_model('checkpoints/100.pt', device)
 # state shape: (batch_size, action_dim)
 # 例如: (1, 14) 表示机器人当前关节状态
 
-# 3. 推理生成动作 (state 作为条件输入，不参与噪音扩散)
+# 3. 推理生成动作 (Flow Matching Euler ODE)
 actions = model.sample(
     images,
     state=state,        # 机器人当前状态
-    ddim_steps=10,      # DDIM 采样步数
+    num_steps=10,       # Euler ODE 积分步数
     cfg_scale=1.0,      # CFG scale (1.0 = 无 guidance)
     return_all=False    # 只返回 n_action_steps 步
 )
@@ -233,7 +238,7 @@ for i in range(n_action_steps):
 
         pred_actions, metrics = evaluate_sample(
             model, images, state, gt_actions,
-            args.ddim_steps, args.cfg_scale, device
+            args.num_inference_steps, args.cfg_scale, device
         )
 
         all_mse.append(metrics['mse'])

@@ -298,17 +298,19 @@ class FinalLayer(nn.Module):
 
 class DiT(nn.Module):
     """
-    Diffusion model with a Transformer backbone.
+    Flow Matching Transformer backbone for action generation.
+
+    使用 Rectified Flow 训练，模型预测速度场 v = x_1 - noise。
 
     支持 state 条件输入:
         state 是机器人当前状态 (n_obs_steps 最后一帧 = action 第0帧)，
         作为无噪音的条件 token 参与 transformer 计算。
 
         序列结构: [condition(t+z), state, noisy_action_1, ..., noisy_action_{T-1}]
-        - condition: timestep + vision condition (1 token)
+        - condition: timestep embedding + vision condition (1 token)
         - state: 机器人当前状态，无噪音 (1 token)
         - noisy actions: 需要去噪的未来动作序列 (T-1 tokens)
-        总长度 = 1 + 1 + (T-1) = T+1，与原来的位置编码大小一致
+        总长度 = 1 + 1 + (T-1) = T+1
     """
     def __init__(
         self,
@@ -395,16 +397,14 @@ class DiT(nn.Module):
         Forward pass of DiT.
 
         Args:
-            x: (N, T, in_channels) - noisy action sequence to denoise
-               T = future_action_window_size - 1 (state 不参与去噪)
-            t: (N,) - diffusion timesteps
-            z: (N, 1, vision_feature_dim) - 原生视觉条件特征 (无 adapter 投影)
-               通过 ResNet GAP 或 ViT CLS token 得到的全局视觉特征，由 z_embedder 直接投影到 hidden_size
-            state: (N, in_channels) - 机器人当前状态 (n_obs_steps 最后一帧的动作值)
-                   作为无噪音的条件 token
+            x: (N, T, in_channels) - noisy action sequence
+               T = future_action_window_size - 1
+            t: (N,) - discretized timestep indices (integers in [0, num_buckets))
+            z: (N, 1, vision_feature_dim) - vision condition features
+            state: (N, in_channels) - 机器人当前状态，作为无噪音条件 token
 
         Returns:
-            noise_pred: (N, T, in_channels) - predicted noise (仅预测 action[1:] 的噪音)
+            v_pred: (N, T, in_channels) - predicted velocity field
 
         序列结构: [condition(t+z), state, noisy_action_1, ..., noisy_action_{T-1}]
         """

@@ -48,9 +48,9 @@ n_obs_steps: 2              # Number of observation history steps
 n_action_steps: 8          # Number of action steps to execute per inference
                             # Should be <= future_action_window from training
 
-# DDIM sampling settings
-ddim_steps: 10              # Number of DDIM denoising steps
-                            # Lower = faster but less accurate
+# Flow Matching inference settings
+num_inference_steps: 10     # Number of Euler ODE integration steps
+                            # Lower = faster but less accurate (GR00T uses 4, RDT-2 uses 5)
                             # Higher = slower but more accurate
 
 # Robot configuration
