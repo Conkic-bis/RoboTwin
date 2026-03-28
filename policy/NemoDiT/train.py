@@ -96,7 +96,13 @@ def parse_args():
     parser.add_argument('--num_inference_steps', type=int, default=10,
                         help='Number of Euler ODE steps for inference (default: 10)')
 
-    # Training arguments 
+    # Legacy diffusion arguments (kept for backward compatibility, ignored)
+    parser.add_argument('--diffusion_steps', type=int, default=None,
+                        help='(Deprecated) Ignored. Kept for backward compatibility.')
+    parser.add_argument('--noise_schedule', type=str, default=None,
+                        help='(Deprecated) Ignored. Kept for backward compatibility.')
+
+    # Training arguments
     parser.add_argument('--batch_size', type=int, default=16,
                         help='Batch size per GPU (default: 16)')
     parser.add_argument('--epochs', type=int, default=500,
