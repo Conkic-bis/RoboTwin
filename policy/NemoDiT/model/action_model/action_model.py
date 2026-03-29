@@ -199,20 +199,23 @@ class ActionModel(nn.Module):
 
     @torch.no_grad()
     def sample(self, images, state=None, num_steps=10, cfg_scale=0, return_all=False,
+               ode_solver='midpoint',
                # Legacy param kept for compatibility
                ddim_steps=None, use_ddim=None):
         """
-        通过 Euler ODE 积分生成动作序列。
+        通过 ODE 积分生成动作序列。
 
-        从 t=0 (纯噪声) 积分到 t=1 (数据):
-            x_{t+dt} = x_t + dt * v_theta(x_t, t)
+        从 t=0 (纯噪声) 积分到 t=1 (数据)。
 
         Args:
             images: (B, n_obs_steps, num_cameras, C, H, W)
             state: (B, in_channels) - 机器人当前状态
-            num_steps: Euler ODE 积分步数 (default: 10)
+            num_steps: ODE 积分步数 (default: 10)
             cfg_scale: Classifier-free guidance scale (default: 0, 无 guidance)
             return_all: 是否返回完整预测动作
+            ode_solver: ODE 求解器类型 (default: 'midpoint')
+                - 'euler': 一阶 Euler 方法，速度快但精度低
+                - 'midpoint': 二阶中点法，精度高，推荐使用
             ddim_steps: Legacy alias for num_steps (backward compat)
 
         Returns:
@@ -236,10 +239,16 @@ class ActionModel(nn.Module):
             def model_fn(x, t, **kwargs):
                 return self.net(x, t, kwargs['z'], state=kwargs.get('state'))
 
-        # 3. Euler ODE sampling
+        # 3. ODE sampling
         predict_length = self.future_action_window_size - 1
         shape = (batch_size, predict_length, self.in_channels)
-        actions = self.flow_matching.euler_sample(
+
+        if ode_solver == 'midpoint':
+            sample_fn = self.flow_matching.midpoint_sample
+        else:
+            sample_fn = self.flow_matching.euler_sample
+
+        actions = sample_fn(
             model_fn,
             shape,
             num_steps=num_steps,

@@ -49,9 +49,13 @@ n_action_steps: 8          # Number of action steps to execute per inference
                             # Should be <= future_action_window from training
 
 # Flow Matching inference settings
-num_inference_steps: 10     # Number of Euler ODE integration steps
+num_inference_steps: 10     # Number of ODE integration steps
                             # Lower = faster but less accurate (GR00T uses 4, RDT-2 uses 5)
                             # Higher = slower but more accurate
+
+ode_solver: midpoint        # ODE solver type
+                            # 'euler': 1st-order, fast but may cause jitter at low steps
+                            # 'midpoint': 2nd-order, smoother trajectories, recommended
 
 # Robot configuration
 use_both_arms: true         # Use dual arm mode

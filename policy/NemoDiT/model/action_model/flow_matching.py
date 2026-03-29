@@ -128,8 +128,8 @@ class FlowMatching:
         """
         Generate samples via Euler ODE integration from t=0 (noise) to t=1 (data).
 
-        dx/dt = v_theta(x_t, t, conditions)
-        x_{t+dt} = x_t + dt * v_theta(x_t, t)
+        一阶 Euler 方法: x_{t+dt} = x_t + dt * v_theta(x_t, t)
+        简单快速，但步数少时误差大，可能导致轨迹抖动。
 
         Args:
             model_fn: callable(x, t, **kwargs) -> velocity prediction
@@ -150,15 +150,71 @@ class FlowMatching:
 
         for i in range(num_steps):
             t_cont = i / float(num_steps)
-            # Create batch of timesteps
             t = torch.full((shape[0],), t_cont, device=device, dtype=x.dtype)
-            # Discretize for timestep embedding
             t_discrete = self.discretize_timestep(t)
 
-            # Predict velocity
             v_pred = model_fn(x, t_discrete, **model_kwargs)
-
-            # Euler step
             x = x + dt * v_pred
+
+        return x
+
+    @torch.no_grad()
+    def midpoint_sample(
+        self,
+        model_fn,
+        shape,
+        num_steps=10,
+        device='cuda',
+        model_kwargs=None,
+    ):
+        """
+        Generate samples via Midpoint (2nd-order Runge-Kutta) ODE integration.
+
+        二阶中点法: 每步调用两次模型，精度远高于 Euler，
+        相同步数下轨迹更平滑，减少机械臂抖动。
+
+        算法:
+            k1 = v_theta(x_t, t)
+            x_mid = x_t + (dt/2) * k1
+            k2 = v_theta(x_mid, t + dt/2)
+            x_{t+dt} = x_t + dt * k2
+
+        注意: 每步需要 2 次前向传播，10 步 midpoint ≈ 20 步 Euler 的精度。
+
+        Args:
+            model_fn: callable(x, t, **kwargs) -> velocity prediction
+            shape: (B, T, C) output shape
+            num_steps: number of integration steps (each step = 2 model calls)
+            device: torch device
+            model_kwargs: dict of extra kwargs for model_fn
+
+        Returns:
+            x: (B, T, C) generated samples
+        """
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        x = torch.randn(shape, device=device)
+        dt = 1.0 / num_steps
+
+        for i in range(num_steps):
+            t_cont = i / float(num_steps)
+            t_mid_cont = (i + 0.5) / float(num_steps)
+
+            # k1: velocity at current point
+            t = torch.full((shape[0],), t_cont, device=device, dtype=x.dtype)
+            t_discrete = self.discretize_timestep(t)
+            k1 = model_fn(x, t_discrete, **model_kwargs)
+
+            # Midpoint: x_mid = x + (dt/2) * k1
+            x_mid = x + (dt / 2) * k1
+
+            # k2: velocity at midpoint
+            t_mid = torch.full((shape[0],), t_mid_cont, device=device, dtype=x.dtype)
+            t_mid_discrete = self.discretize_timestep(t_mid)
+            k2 = model_fn(x_mid, t_mid_discrete, **model_kwargs)
+
+            # Full step using midpoint velocity
+            x = x + dt * k2
 
         return x

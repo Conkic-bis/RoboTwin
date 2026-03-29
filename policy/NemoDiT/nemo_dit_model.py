@@ -23,6 +23,7 @@ class NemoDiT:
         n_obs_steps: int = 1,
         n_action_steps: int = 10,
         num_inference_steps: int = 10,
+        ode_solver: str = "midpoint",
         device: str = "cuda:0",
         quat_convention: str = "wxyz",
         use_both_arms: bool = True,
@@ -35,6 +36,7 @@ class NemoDiT:
         self.n_action_steps = n_action_steps
         # Support legacy ddim_steps param
         self.num_inference_steps = ddim_steps if ddim_steps is not None else num_inference_steps
+        self.ode_solver = ode_solver
         self.quat_convention = quat_convention
         self.use_both_arms = use_both_arms
         self.action_type = action_type
@@ -268,11 +270,12 @@ class NemoDiT:
         # Prepare state for conditioning: (1, action_dim)
         state = self._prepare_state_input()
 
-        # 使用 model.sample() 进行推理 (Euler ODE)
+        # 使用 model.sample() 进行推理 (Flow Matching ODE)
         action_pred = self.model.sample(
             images,
             state=state,
             num_steps=self.num_inference_steps,
+            ode_solver=self.ode_solver,
             cfg_scale=1.0,  # 无 classifier-free guidance
             return_all=False  # 只返回 n_action_steps 步
         )  # (1, n_action_steps, action_dim)
