@@ -209,3 +209,7 @@ __marimo__/
 *.hdf5
 .vscode
 *.pt
+checkpoints/
+__pycache__/
+model/__pycache__/
+wandb/

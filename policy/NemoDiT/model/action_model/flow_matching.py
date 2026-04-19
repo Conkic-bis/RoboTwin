@@ -1,0 +1,147 @@
+# Flow Matching (Rectified Flow) for Action Generation
+#
+# Shared flow matching logic between NemoDiT and Qwen3VL policies.
+# Supports velocity prediction and ODE-based sampling.
+#
+# References:
+#   - NVIDIA Isaac-GR00T: Beta time sampling + Euler ODE
+#   - thu-ml/RDT-2: LogisticNormal time sampling + Euler ODE
+#   - ABot-Manipulation: Flow matching with cross-attention DiT
+#   - Lipman et al. (2023): Flow Matching for Generative Modeling
+#
+# Flow matching formulation:
+#   - Interpolation: x_t = (1 - t) * noise + t * x_1   (t=0: noise, t=1: data)
+#   - Velocity target: v = x_1 - noise
+#   - Loss: MSE(v_pred, v)
+#   - Inference: ODE integration from t=0 to t=1
+
+import torch
+import math
+
+
+class FlowMatching:
+    """
+    Rectified Flow / Conditional Flow Matching for action generation.
+
+    Supports multiple time sampling strategies:
+    - 'logit_normal': LogisticNormal(loc, scale) - biases toward mid-range t (RDT-2 style)
+    - 'beta': Beta(alpha, beta) - can bias toward early steps (GR00T style)
+    - 'uniform': Uniform distribution in [0, 1]
+    """
+
+    def __init__(
+        self,
+        time_sampling='logit_normal',
+        logit_normal_loc=0.0,
+        logit_normal_scale=1.0,
+        beta_alpha=1.5,
+        beta_beta=1.0,
+        noise_s=0.999,
+        num_timestep_buckets=1000,
+    ):
+        self.time_sampling = time_sampling
+        self.logit_normal_loc = logit_normal_loc
+        self.logit_normal_scale = logit_normal_scale
+        self.beta_alpha = beta_alpha
+        self.beta_beta = beta_beta
+        self.noise_s = noise_s
+        self.num_timestep_buckets = num_timestep_buckets
+
+    def sample_time(self, batch_size, device, dtype=torch.float32):
+        """
+        Sample continuous timesteps t in (0, 1) for training.
+
+        Returns:
+            t: (batch_size,) tensor of timesteps
+        """
+        if self.time_sampling == 'logit_normal':
+            z = torch.randn(batch_size, device=device, dtype=dtype)
+            z = self.logit_normal_loc + self.logit_normal_scale * z
+            t = torch.sigmoid(z)
+        elif self.time_sampling == 'beta':
+            dist = torch.distributions.Beta(self.beta_alpha, self.beta_beta)
+            s = dist.sample((batch_size,)).to(device=device, dtype=dtype)
+            t = (1 - s) * self.noise_s
+        elif self.time_sampling == 'uniform':
+            t = torch.rand(batch_size, device=device, dtype=dtype)
+        else:
+            raise ValueError(f"Unknown time sampling: {self.time_sampling}")
+
+        t = t.clamp(1e-5, 1.0 - 1e-5)
+        return t
+
+    def q_sample(self, x_1, t, noise):
+        """
+        Compute noisy sample x_t via linear interpolation.
+        x_t = (1 - t) * noise + t * x_1
+
+        Args:
+            x_1: (B, T, C) clean action data
+            t: (B,) continuous timesteps in [0, 1]
+            noise: (B, T, C) Gaussian noise
+
+        Returns:
+            x_t: (B, T, C) noisy sample
+        """
+        t = t[:, None, None]
+        return (1 - t) * noise + t * x_1
+
+    def compute_velocity(self, x_1, noise):
+        """
+        Compute ground-truth velocity: v = x_1 - noise
+        """
+        return x_1 - noise
+
+    def discretize_timestep(self, t):
+        """Discretize continuous t to integer bucket indices for timestep embedding."""
+        return (t * self.num_timestep_buckets).long().clamp(0, self.num_timestep_buckets - 1)
+
+    @torch.no_grad()
+    def euler_sample(self, model_fn, shape, num_steps=10, device='cuda', model_kwargs=None):
+        """
+        Generate samples via Euler ODE integration from t=0 (noise) to t=1 (data).
+        """
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        x = torch.randn(shape, device=device)
+        dt = 1.0 / num_steps
+
+        for i in range(num_steps):
+            t_cont = i / float(num_steps)
+            t = torch.full((shape[0],), t_cont, device=device, dtype=x.dtype)
+            t_discrete = self.discretize_timestep(t)
+            v_pred = model_fn(x, t_discrete, **model_kwargs)
+            x = x + dt * v_pred
+
+        return x
+
+    @torch.no_grad()
+    def midpoint_sample(self, model_fn, shape, num_steps=10, device='cuda', model_kwargs=None):
+        """
+        Generate samples via Midpoint (2nd-order Runge-Kutta) ODE integration.
+        More accurate than Euler, reduces trajectory jitter.
+        """
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        x = torch.randn(shape, device=device)
+        dt = 1.0 / num_steps
+
+        for i in range(num_steps):
+            t_cont = i / float(num_steps)
+            t_mid_cont = (i + 0.5) / float(num_steps)
+
+            t = torch.full((shape[0],), t_cont, device=device, dtype=x.dtype)
+            t_discrete = self.discretize_timestep(t)
+            k1 = model_fn(x, t_discrete, **model_kwargs)
+
+            x_mid = x + (dt / 2) * k1
+
+            t_mid = torch.full((shape[0],), t_mid_cont, device=device, dtype=x.dtype)
+            t_mid_discrete = self.discretize_timestep(t_mid)
+            k2 = model_fn(x_mid, t_mid_discrete, **model_kwargs)
+
+            x = x + dt * k2
+
+        return x

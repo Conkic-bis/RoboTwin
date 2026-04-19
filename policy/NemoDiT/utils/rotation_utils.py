@@ -1,13 +1,3 @@
-"""
-rotation_utils.py
-
-Utility functions for rotation representations conversion.
-Supports conversion between quaternion, rotation matrix, and rot6d representations.
-
-rot6d (6D rotation representation) is from the paper:
-"On the Continuity of Rotation Representations in Neural Networks" (Zhou et al., CVPR 2019)
-"""
-
 import numpy as np
 from typing import Union
 

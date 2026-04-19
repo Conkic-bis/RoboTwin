@@ -1,0 +1,83 @@
+# ============================================================================
+# Qwen3VL + Flow Matching Policy Configuration for RoboTwin
+# ============================================================================
+#
+# This policy uses Qwen3-VL as the vision-language backbone and
+# flow matching (Rectified Flow) with a cross-attention DiT as the
+# action model. Inspired by ABot-Manipulation architecture.
+#
+# Architecture:
+#   Qwen3-VL (frozen/LoRA) -> VLM hidden states
+#   -> VLM projection -> cross-attention context
+#   -> Cross-Attention DiT + Flow Matching -> actions
+#
+# ============================================================================
+
+# Basic RoboTwin parameters (will be overridden by command line)
+policy_name: NemoDiT_qwen_fm
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# Checkpoint settings
+expert_data_num: 100
+checkpoint_num: 400
+
+# Camera configuration
+head_camera_type: D435
+
+# ============================================================================
+# VLM Parameters
+# ============================================================================
+
+# Qwen3-VL model name (HuggingFace or local path)
+# Options: Qwen/Qwen3-VL-4B-Instruct, Qwen/Qwen3-VL-7B-Instruct, Qwen/Qwen3-VL-32B-Instruct
+vlm_model_name: Qwen/Qwen3-VL-4B-Instruct
+
+# Task instruction for VLM conditioning
+instruction: "Pick the silver curved hammer head from the table and strike"
+
+# ============================================================================
+# Action Model Parameters
+# ============================================================================
+
+# Action type: "endpose" or "joint"
+action_type: joint
+
+# DiT model size for action head
+# DiT-S: light (384d, 12 layers) - fast inference
+# DiT-B: base  (768d, 12 layers) - balanced
+# DiT-L: large (1024d, 24 layers) - high capacity
+dit_model_type: DiT-S
+
+# Observation settings
+n_obs_steps: 1                # Number of observation history steps
+
+# Action settings
+n_action_steps: 8             # Action steps to execute per inference
+
+# ============================================================================
+# Flow Matching Inference Settings
+# ============================================================================
+
+num_inference_steps: 10       # ODE integration steps
+ode_solver: midpoint          # 'euler' or 'midpoint' (recommended)
+
+# ============================================================================
+# Robot Configuration
+# ============================================================================
+
+use_both_arms: true
+quat_convention: wxyz
+
+# ============================================================================
+# Advanced Settings (optional)
+# ============================================================================
+
+# Direct checkpoint path (overrides task_name based path)
+# checkpoint_path: null
+
+# Model architecture (read from checkpoint by default)
+# future_action_window: 13
