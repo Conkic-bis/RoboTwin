@@ -455,16 +455,20 @@ def train():
     if args.use_amp:
         print("Using Automatic Mixed Precision (AMP) training")
 
-    # EMA (Exponential Moving Average)
+    # EMA (Exponential Moving Average) — only track the diffusion transformer (model.net),
+    # skipping vision_backbone / feature_adapter to save memory and avoid averaging
+    # parameters that either don't benefit (pretrained encoder) or aren't the target
+    # of smoothing for diffusion sampling quality.
     ema_model = None
     if args.use_ema:
         ema_model = EMAModel(
-            model,
+            model.net,
             inv_gamma=args.ema_inv_gamma,
             power=args.ema_power,
             max_value=args.ema_max_value,
         )
-        print(f"Using EMA (inv_gamma={args.ema_inv_gamma}, power={args.ema_power}, "
+        print(f"Using EMA on diffusion transformer only "
+              f"(inv_gamma={args.ema_inv_gamma}, power={args.ema_power}, "
               f"max_value={args.ema_max_value})")
 
     # Resume from checkpoint if specified
@@ -518,7 +522,7 @@ def train():
 
             # Update EMA model
             if ema_model is not None:
-                ema_model.step(model)
+                ema_model.step(model.net)
 
             # Update metrics
             epoch_loss += loss.item()
