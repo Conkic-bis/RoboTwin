@@ -1,12 +1,25 @@
-import torch
-import numpy as np
-from typing import Dict, List, Optional, Any
-from collections import deque
+# Inference wrapper for the Qwen3-VL + Flow Matching ActionModel.
+#
+# What changed vs the 2.0 branch:
+#   - The ResNet vision path was replaced by a Qwen3-VL VLM. The processor
+#     wants RAW per-camera images (uint8 RGB) plus a plain-text instruction,
+#     not ImageNet-normalized tensors. So the obs cache now stores raw
+#     numpy frames and build_inputs is handled inside the VLM.
+#   - checkpoint['model_state_dict'] written by train.py is already the
+#     *unwrapped* tree (see train.save_checkpoint), so we just call
+#     load_state_dict once without touching any `_orig_mod.` prefix.
+#   - For single-step inference we call encode_vlm_batch + loss-free
+#     sampling once per decision; batch dim is always 1 here (a single
+#     robot) but the batch path still applies as a degenerate B=1 case.
 
 import sys
+from collections import deque
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# Add parent directory to path for imports
+import numpy as np
+import torch
+
 parent_dir = str(Path(__file__).parent)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
@@ -16,6 +29,14 @@ from utils.rotation_utils import convert_endpose_9d_to_7d
 
 
 class NemoDiT:
+    """
+    Runtime wrapper around ActionModel for policy deployment.
+
+    The model stores a rolling window of RAW per-camera images (uint8 RGB),
+    plus an optional robot state vector, and a language instruction.
+    encode_vlm_batch() is called once per decision with B=1 to produce the
+    conditioning context for the DiT sampler.
+    """
 
     def __init__(
         self,
@@ -23,270 +44,212 @@ class NemoDiT:
         n_obs_steps: int = 1,
         n_action_steps: int = 10,
         num_inference_steps: int = 10,
-        ode_solver: str = "midpoint",
-        device: str = "cuda:0",
-        quat_convention: str = "wxyz",
+        ode_solver: str = 'midpoint',
+        device: str = 'cuda:0',
+        quat_convention: str = 'wxyz',
         use_both_arms: bool = True,
-        action_type: str = "endpose",
+        action_type: str = 'endpose',
+        instruction: str = 'Predict the next robot actions.',
         # Legacy param
-        ddim_steps: int = None,
+        ddim_steps: Optional[int] = None,
     ):
         self.device = device
         self.n_obs_steps = n_obs_steps
         self.n_action_steps = n_action_steps
-        # Support legacy ddim_steps param
         self.num_inference_steps = ddim_steps if ddim_steps is not None else num_inference_steps
         self.ode_solver = ode_solver
         self.quat_convention = quat_convention
         self.use_both_arms = use_both_arms
         self.action_type = action_type
+        self.instruction = instruction
 
-        # Load model
         self.model = self._load_model(ckpt_file)
         self.model.eval()
 
-        # Observation cache
-        self.obs_cache: Optional[Dict[str, deque]] = None
+        self.obs_cache: Optional[Dict[str, Any]] = None
         self.action_queue: List[np.ndarray] = []
 
-        # Action dimension info based on action_type
-        # endpose: Single arm: 10D (3 translation + 6 rot6d + 1 gripper), Dual arm: 20D
-        # joint: Single arm: 7D (6 joint + 1 gripper), Dual arm: 14D
-        if action_type == "endpose":
+        # Per-arm action-dim bookkeeping used by the RoboTwin format
+        # converter. The model itself is agnostic; these live here.
+        if action_type == 'endpose':
             self.single_arm_dim = 10
-        else:  # joint
+        else:
             self.single_arm_dim = 7
 
+    # ------------------------------------------------------------------ #
+    # Model loading
+    # ------------------------------------------------------------------ #
+
     def _load_model(self, ckpt_file: str) -> ActionModel:
-        """
-        Load model from checkpoint.
-
-        参考 eval.py 的 load_model 函数，使用 checkpoint 中保存的完整训练参数。0204
-        这确保了模型结构与训练时完全一致。
-        """
-        print(f"Loading checkpoint from: {ckpt_file}")
+        print(f"[NemoDiT] loading checkpoint: {ckpt_file}")
         checkpoint = torch.load(ckpt_file, map_location='cpu')
+        train_args = checkpoint.get('args', {}) or {}
 
-        # 获取训练时的参数
-        train_args = checkpoint.get('args', {})
-
-        # 打印模型配置信息
-        print(f"Model config: {train_args.get('model_type', 'DiT-B')}, "
-              f"action_dim={train_args.get('action_dim', 'N/A')}")
-        print(f"Temporal config: n_obs_steps={train_args.get('n_obs_steps', 1)}, "
-              f"n_action_steps={train_args.get('n_action_steps', 'N/A')}, "
-              f"future_action_window={train_args.get('future_action_window', 'N/A')}")
+        print(
+            f"[NemoDiT] model_type={train_args.get('model_type', 'DiT-B')} "
+            f"action_dim={train_args.get('action_dim', 'N/A')} "
+            f"n_obs_steps={train_args.get('n_obs_steps', 1)} "
+            f"n_action_steps={train_args.get('n_action_steps', 'N/A')}"
+        )
 
         model = ActionModel(
-            token_size=train_args.get('token_size', 2048),
             model_type=train_args.get('model_type', 'DiT-B'),
             in_channels=train_args.get('action_dim', 20 if self.use_both_arms else 10),
             future_action_window_size=train_args.get('future_action_window', 10),
             past_action_window_size=train_args.get('past_action_window', 0),
-            # Flow matching parameters
+            n_obs_steps=train_args.get('n_obs_steps', 1),
+            n_action_steps=train_args.get('n_action_steps', self.n_action_steps),
+            # VLM
+            vlm_model_name=train_args.get('vlm_model_name', 'Qwen/Qwen3-VL-4B-Instruct'),
+            freeze_vlm=train_args.get('freeze_vlm', True),
+            use_lora=train_args.get('use_lora', False),
+            lora_r=train_args.get('lora_r', 16),
+            lora_alpha=train_args.get('lora_alpha', 32),
+            # Flow matching
             time_sampling=train_args.get('time_sampling', 'logit_normal'),
             logit_normal_loc=train_args.get('logit_normal_loc', 0.0),
             logit_normal_scale=train_args.get('logit_normal_scale', 1.0),
             beta_alpha=train_args.get('beta_alpha', 1.5),
             beta_beta=train_args.get('beta_beta', 1.0),
             num_timestep_buckets=train_args.get('num_timestep_buckets', 1000),
-            use_vision_condition=True,
-            vision_backbone_type=train_args.get('vision_backbone', 'resnet50'),
-            vision_pretrained=False,  # 不需要预训练权重，我们会加载训练好的
+            # legacy knobs — ignored, kept for argparse compat
+            token_size=train_args.get('token_size', 2048),
+            vision_backbone_type=train_args.get('vision_backbone', None),
+            vision_pretrained=False,
             num_cameras=train_args.get('num_cameras', 4),
-            freeze_vision_backbone=False,
-            adapter_type=train_args.get('adapter_type', 'mlp'),
-            class_dropout_prob=0.0,  # 推理时关闭 dropout
-            n_obs_steps=train_args.get('n_obs_steps', 1),
-            n_action_steps=train_args.get('n_action_steps', self.n_action_steps),
+            adapter_type=train_args.get('adapter_type', None),
+            class_dropout_prob=0.0,
             temporal_agg=train_args.get('temporal_agg', 'last'),
         )
 
-        # 加载权重
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        # train.save_checkpoint() always unwraps the compiled modules, so
+        # keys in model_state_dict match the eager module tree exactly.
+        # strict=False because frozen VLM weights are typically not saved.
+        missing, unexpected = model.load_state_dict(
+            checkpoint['model_state_dict'], strict=False,
+        )
+        # Report only non-VLM mismatches — missing VLM keys are expected
+        # whenever freeze_vlm=True and we reload from the HF hub.
+        missing_non_vlm = [k for k in missing if not k.startswith('vlm.')]
+        if missing_non_vlm:
+            print(f"[NemoDiT] WARN missing keys (non-vlm): {missing_non_vlm[:8]}"
+                  f"{' ...' if len(missing_non_vlm) > 8 else ''}")
+        if unexpected:
+            print(f"[NemoDiT] WARN unexpected keys: {unexpected[:8]}"
+                  f"{' ...' if len(unexpected) > 8 else ''}")
+
         model = model.to(self.device)
 
-        # 更新实例变量以匹配训练配置
+        # Update local knobs to whatever the checkpoint was trained with.
         self.n_obs_steps = train_args.get('n_obs_steps', self.n_obs_steps)
         self.n_action_steps = train_args.get('n_action_steps', self.n_action_steps)
-
-        print(f"Model loaded from epoch {checkpoint.get('epoch', 'N/A')}")
+        print(f"[NemoDiT] loaded epoch={checkpoint.get('epoch', 'N/A')}")
         return model
 
+    # ------------------------------------------------------------------ #
+    # Observation cache
+    # ------------------------------------------------------------------ #
+
     def reset_obs(self):
-        """Reset observation cache at the beginning of each episode."""
         self.obs_cache = None
         self.action_queue = []
 
     def update_obs(self, obs: Dict[str, np.ndarray]):
-        """
-        Update observation cache with new observation.
+        """Append the latest observation to the rolling cache.
 
-        When the cache is empty (e.g. first call after reset), the observation
-        is duplicated to fill the entire n_obs_steps window so that
-        _prepare_vision_input always produces the shape the model expects.
-
-        Args:
-            obs: Dictionary containing:
-                - 'images': (num_cameras, 3, H, W) normalized images
-                - 'agent_pos': (action_dim,) current joint/ee positions (optional)
+        obs['images_raw'] is a list of per-camera uint8 RGB arrays; we
+        duplicate the first frame to fill the n_obs_steps window.
         """
         if self.obs_cache is None:
-            # Initialize cache and pad with the first observation
             self.obs_cache = {
-                'images': deque(maxlen=self.n_obs_steps),
+                'images_raw': deque(maxlen=self.n_obs_steps),
             }
             for _ in range(self.n_obs_steps):
-                self.obs_cache['images'].append(obs['images'])
+                self.obs_cache['images_raw'].append(obs['images_raw'])
         else:
-            self.obs_cache['images'].append(obs['images'])
+            self.obs_cache['images_raw'].append(obs['images_raw'])
 
-        # Cache current robot state for state conditioning
         if 'agent_pos' in obs:
             self.obs_cache['agent_pos'] = obs['agent_pos']
+        if 'instruction' in obs and obs['instruction']:
+            self.obs_cache['instruction'] = obs['instruction']
 
-    def _prepare_vision_input(self) -> torch.Tensor:
-        """Prepare vision input from observation cache."""
-        if self.obs_cache is None or len(self.obs_cache['images']) == 0:
-            raise ValueError("No observations in cache. Call update_obs first.")
+    # ------------------------------------------------------------------ #
+    # Input prep
+    # ------------------------------------------------------------------ #
 
-        # Stack all cached observations along a temporal dimension
-        # Each element in the deque is (num_cameras, 3, H, W)
-        images_list = list(self.obs_cache['images'])  # list of (num_cameras, 3, H, W)
-        images = np.stack(images_list, axis=0)  # (n_obs_steps, num_cameras, 3, H, W)
+    def _current_images(self) -> List[np.ndarray]:
+        """Latest frame's per-camera uint8 images (what Qwen3-VL expects)."""
+        if self.obs_cache is None or len(self.obs_cache['images_raw']) == 0:
+            raise ValueError("obs cache empty — call update_obs() first")
+        return self.obs_cache['images_raw'][-1]
 
-        # Add batch dimension
-        images = np.expand_dims(images, axis=0)  # (1, n_obs_steps, num_cameras, 3, H, W)
-
-        # Convert to tensor
-        images_tensor = torch.from_numpy(images).float().to(self.device)
-
-        return images_tensor
-
-    def _prepare_state_input(self) -> Optional[torch.Tensor]:
-        """Prepare state tensor from observation cache for state conditioning."""
+    def _current_state(self) -> Optional[torch.Tensor]:
         if self.obs_cache is None or 'agent_pos' not in self.obs_cache:
             return None
+        agent_pos = self.obs_cache['agent_pos']
+        return torch.from_numpy(np.asarray(agent_pos, dtype=np.float32))[None].to(self.device)
 
-        agent_pos = self.obs_cache['agent_pos']  # (action_dim,)
-        # Add batch dimension and convert to tensor
-        state = np.expand_dims(agent_pos, axis=0)  # (1, action_dim)
-        state_tensor = torch.from_numpy(state).float().to(self.device)
-        return state_tensor
+    def _current_instruction(self) -> str:
+        if self.obs_cache is not None and 'instruction' in self.obs_cache:
+            return self.obs_cache['instruction']
+        return self.instruction
+
+    # ------------------------------------------------------------------ #
+    # RoboTwin action format conversion (unchanged)
+    # ------------------------------------------------------------------ #
 
     def _convert_action_to_robotwin(self, action: np.ndarray) -> np.ndarray:
-        """
-        Convert model output to RoboTwin format.
-
-        take_action() always expects dual-arm layout:
-            [left_arm, left_gripper, right_arm, right_gripper]
-
-        For endpose action_type:
-            - Converts rot6d to quaternion per arm
-            - Dual arm input (T, 20) → output (T, 16)
-
-        For joint action_type:
-            - No rotation conversion needed
-            - Dual arm input (T, 14) → output (T, 14)
-
-        Args:
-            action: (T, action_dim) action sequence
-
-        Returns:
-            Converted action in RoboTwin format
-        """
-        if self.action_type == "joint":
+        if self.action_type == 'joint':
             if self.use_both_arms:
-                # (T, 14) = [left_joints(6), left_gripper(1),
-                #             right_joints(6), right_gripper(1)]
-                left_action = action[:, :7]    # (T, 7)
-                right_action = action[:, 7:14] # (T, 7)
-                return np.concatenate([left_action, right_action], axis=-1)
-            else:
-                # Single arm (T, 7) = [joints(6), gripper(1)]
-                return action
-        else:
-            # endpose: need rot6d → quaternion conversion
-            if self.use_both_arms:
-                # (T, 20) = [left(10), right(10)]
-                left_action = action[:, :10]
-                right_action = action[:, 10:20]
-                left_converted = self._convert_single_arm_action(left_action)
-                right_converted = self._convert_single_arm_action(right_action)
-                return np.concatenate([left_converted, right_converted], axis=-1)
-            else:
-                return self._convert_single_arm_action(action)
+                left = action[:, :7]
+                right = action[:, 7:14]
+                return np.concatenate([left, right], axis=-1)
+            return action
+        # endpose
+        if self.use_both_arms:
+            left = self._convert_single_arm_action(action[:, :10])
+            right = self._convert_single_arm_action(action[:, 10:20])
+            return np.concatenate([left, right], axis=-1)
+        return self._convert_single_arm_action(action)
 
     def _convert_single_arm_action(self, action: np.ndarray) -> np.ndarray:
-        """
-        Convert single arm action from rot6d to quaternion format.
+        translation = action[:, :3]
+        rot6d = action[:, 3:9]
+        gripper = action[:, 9:10]
+        pose_9d = np.concatenate([translation, rot6d], axis=-1)
+        pose_7d = convert_endpose_9d_to_7d(pose_9d, self.quat_convention)
+        return np.concatenate([pose_7d, gripper], axis=-1)
 
-        Args:
-            action: (T, 10) - [x,y,z, r1-r6, gripper]
-
-        Returns:
-            (T, 8) - [x,y,z, qw,qx,qy,qz, gripper]
-        """
-        T = action.shape[0]
-
-        # Extract components
-        translation = action[:, :3]  # (T, 3)
-        rot6d = action[:, 3:9]  # (T, 6)
-        gripper = action[:, 9:10]  # (T, 1)
-
-        # Convert rot6d to 7d pose (translation + quaternion)
-        pose_9d = np.concatenate([translation, rot6d], axis=-1)  # (T, 9)
-        pose_7d = convert_endpose_9d_to_7d(pose_9d, self.quat_convention)  # (T, 7)
-
-        # Combine with gripper
-        return np.concatenate([pose_7d, gripper], axis=-1)  # (T, 8)
+    # ------------------------------------------------------------------ #
+    # Inference
+    # ------------------------------------------------------------------ #
 
     @torch.no_grad()
     def get_action(self, obs: Dict[str, np.ndarray]) -> List[np.ndarray]:
-        """
-        Get action sequence from current observation.
-
-        使用 model.sample() 方法进行推理，与 eval.py 保持一致。
-
-        Args:
-            obs: Dictionary containing:
-                - 'images': (num_cameras, 3, H, W) normalized images
-
-        Returns:
-            List of actions to execute
-        """
-        # Update observation cache
         self.update_obs(obs)
 
-        # Check if we have queued actions
         if len(self.action_queue) > 0:
-            # Return remaining queued actions
-            action = self.action_queue.pop(0)
-            return [action]
+            return [self.action_queue.pop(0)]
 
-        # Prepare input: (1, n_obs_steps, num_cameras, C, H, W)
-        images = self._prepare_vision_input()
+        images_raw = self._current_images()
+        state = self._current_state()
+        instruction = self._current_instruction()
 
-        # Prepare state for conditioning: (1, action_dim)
-        state = self._prepare_state_input()
-
-        # 使用 model.sample() 进行推理 (Flow Matching ODE)
+        # B=1 degenerate batch: images wrapped in an outer list of length 1.
         action_pred = self.model.sample(
-            images,
+            images=[images_raw],
+            instructions=[instruction],
             state=state,
             num_steps=self.num_inference_steps,
             ode_solver=self.ode_solver,
-            cfg_scale=1.0,  # 无 classifier-free guidance
-            return_all=False  # 只返回 n_action_steps 步
+            cfg_scale=1.0,
+            return_all=False,
         )  # (1, n_action_steps, action_dim)
 
-        # Convert to numpy
-        action_pred = action_pred.cpu().numpy()[0]  # (n_action_steps, action_dim)
-
-        # Convert to RoboTwin format
+        action_pred = action_pred.cpu().numpy()[0]
         action_converted = self._convert_action_to_robotwin(action_pred)
 
-        # Queue actions (execute first n_action_steps)
         actions_to_execute = min(self.n_action_steps, len(action_converted))
         for i in range(1, actions_to_execute):
             self.action_queue.append(action_converted[i])
@@ -295,37 +258,19 @@ class NemoDiT:
 
     @torch.no_grad()
     def get_all_actions(self, obs: Dict[str, np.ndarray]) -> np.ndarray:
-        """
-        Get all predicted actions at once (without queueing).
-
-        使用 model.sample() 方法进行推理，与 eval.py 保持一致。
-
-        Args:
-            obs: Dictionary containing images
-
-        Returns:
-            (T, action_dim) action sequence in RoboTwin format
-        """
-        # Update observation cache
         self.update_obs(obs)
+        images_raw = self._current_images()
+        state = self._current_state()
+        instruction = self._current_instruction()
 
-        # Prepare input: (1, n_obs_steps, num_cameras, C, H, W)
-        images = self._prepare_vision_input()
-
-        # Prepare state for conditioning: (1, action_dim)
-        state = self._prepare_state_input()
-
-        # 使用 model.sample() 进行推理，截取 n_action_steps 步用于执行
         action_pred = self.model.sample(
-            images,
+            images=[images_raw],
+            instructions=[instruction],
             state=state,
-            ddim_steps=self.ddim_steps,
-            cfg_scale=1.0,  # 无 classifier-free guidance
-            return_all=False  # 只返回 n_action_steps 步
-        )  # (1, n_action_steps, action_dim)
-
-        # Convert to numpy
-        action_pred = action_pred.cpu().numpy()[0]  # (T, action_dim)
-
-        # Convert to RoboTwin format
+            num_steps=self.num_inference_steps,
+            ode_solver=self.ode_solver,
+            cfg_scale=1.0,
+            return_all=False,
+        )
+        action_pred = action_pred.cpu().numpy()[0]
         return self._convert_action_to_robotwin(action_pred)
