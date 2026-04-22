@@ -19,7 +19,7 @@ seed=${4}
 gpu_id=${5}
 
 # ---- Model ---------------------------------------------------------------
-model_type="DiT-B"                                # DiT-S | DiT-B | DiT-L | DiT-XL
+model_type="DiT-S"                                # DiT-S | DiT-B | DiT-L | DiT-XL
 
 # ---- VLM -----------------------------------------------------------------
 vlm_model_name="Qwen/Qwen3-VL-4B-Instruct"
@@ -41,7 +41,7 @@ past_action_window=0
 temporal_agg="concat"                             # last | mean | concat
 
 # ---- Flow matching -------------------------------------------------------
-time_sampling="logit_normal"                      # logit_normal | beta | uniform
+time_sampling="beta"                      # logit_normal | beta | uniform
 logit_normal_loc=0.0
 logit_normal_scale=1.0
 beta_alpha=1.5
