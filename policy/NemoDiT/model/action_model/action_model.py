@@ -22,7 +22,7 @@ import torch
 from torch import nn
 
 from model.vlm.qwen3_vl import Qwen3VLInterface
-from model.flow_matching_head.cross_attention_dit import (
+from model.action_model.cross_attention_dit import (
     CrossAttentionDiT, DiT_CrossAttn_models,
 )
 from model.action_model.flow_matching import FlowMatching

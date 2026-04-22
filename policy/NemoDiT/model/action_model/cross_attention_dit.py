@@ -5,6 +5,8 @@
 # with AdaLayerNorm timestep conditioning.
 #
 # Reference: ABot-Manipulation flow_matching_head/cross_attention_dit.py
+# (Co-located under action_model/ after the flow_matching_head split was
+#  collapsed — this file is the DiT backbone used by ActionModel.)
 
 import torch
 import torch.nn as nn
