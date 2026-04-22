@@ -1,13 +1,3 @@
-# Cross-Attention DiT for Flow Matching Action Generation
-#
-# DiT transformer with cross-attention to VLM embeddings.
-# Action tokens attend to VLM hidden states via cross-attention,
-# with AdaLayerNorm timestep conditioning.
-#
-# Reference: ABot-Manipulation flow_matching_head/cross_attention_dit.py
-# (Co-located under action_model/ after the flow_matching_head split was
-#  collapsed — this file is the DiT backbone used by ActionModel.)
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -338,15 +328,16 @@ class CrossAttentionDiT(nn.Module):
         return x
 
 
-# Model size presets (matching ABot naming)
+# Model size presets
+
+def DiT_S_CrossAttn(**kwargs):
+    return CrossAttentionDiT(hidden_size=384, depth=12, num_heads=6, **kwargs)
+
 def DiT_B_CrossAttn(**kwargs):
     return CrossAttentionDiT(hidden_size=768, depth=12, num_heads=12, **kwargs)
 
 def DiT_L_CrossAttn(**kwargs):
     return CrossAttentionDiT(hidden_size=1024, depth=24, num_heads=16, **kwargs)
-
-def DiT_S_CrossAttn(**kwargs):
-    return CrossAttentionDiT(hidden_size=384, depth=12, num_heads=6, **kwargs)
 
 def DiT_XL_CrossAttn(**kwargs):
     return CrossAttentionDiT(hidden_size=1152, depth=28, num_heads=16, **kwargs)
