@@ -68,12 +68,12 @@ def parse_args():
                         help='Number of action steps to execute during inference (default: 8)')
 
     # Vision arguments
-    parser.add_argument('--vision_backbone', type=str, default='resnet50',
+    parser.add_argument('--vision_backbone', type=str, default='resnet18',
                         choices=['resnet18', 'resnet34', 'resnet50', 'vit_b_16', 'vit_b_32'],
                         help='Vision backbone type (default: resnet50)')
     parser.add_argument('--vision_pretrained', action='store_true', default=True,
                         help='Use pretrained vision backbone')
-    parser.add_argument('--freeze_vision', action='store_true', default=False,
+    parser.add_argument('--freeze_vision', action='store_true', default=True,
                         help='Freeze vision backbone weights')
     parser.add_argument('--adapter_type', type=str, default='mlp',
                         choices=['linear', 'mlp', 'attention_pooling'],

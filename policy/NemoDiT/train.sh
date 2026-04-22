@@ -31,8 +31,8 @@ gpu_id=${5}
 # ============================================================================
 
 # Model configuration
-model_type="DiT-B"           # Model size: DiT-S, DiT-B, DiT-L, DiT-XL
-vision_backbone="resnet50"    # Vision backbone: resnet18, resnet34, resnet50, vit_b_16, vit_b_32
+model_type="DiT-S"           # Model size: DiT-S, DiT-B, DiT-L, DiT-XL
+vision_backbone="resnet18"    # Vision backbone: resnet18, resnet34, resnet50, vit_b_16, vit_b_32
 adapter_type="mlp"            # Feature adapter: linear, mlp, attention_pooling
 
 # Action configuration
