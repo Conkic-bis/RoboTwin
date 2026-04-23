@@ -228,51 +228,6 @@ def reset_model(model: NemoDiT):
 
 
 # ============================================================================
-# Alternative evaluation function with more control
-# ============================================================================
-
-def eval_with_action_queue(TASK_ENV, model: NemoDiT, observation: Dict[str, Any]):
-    """
-    Alternative evaluation loop using action queueing.
-
-    Instead of executing all predicted actions at once, this version:
-    1. Predicts a sequence of actions
-    2. Executes them one by one from the queue
-    3. Only re-predicts when the queue is empty
-
-    This can be more responsive to environment changes.
-    """
-    global _ACTION_TYPE
-
-    obs = encode_obs(observation)
-    instruction = TASK_ENV.get_instruction()
-
-    # Map policy action_type to environment action_type parameter
-    if _ACTION_TYPE == "joint":
-        control_mode = "qpos"
-    else:  # endpose
-        control_mode = "ee"
-
-    max_steps = 1000  # Maximum steps per episode
-
-    for step in range(max_steps):
-        # Get single action (model handles queueing internally)
-        actions = model.get_action(obs)
-        action = actions[0]
-
-        # Execute action
-        TASK_ENV.take_action(action, action_type=control_mode)
-
-        # Check if done
-        observation = TASK_ENV.get_obs()
-        if TASK_ENV.is_done():
-            break
-
-        # Update observation
-        obs = encode_obs(observation)
-
-
-# ============================================================================
 # Utility functions
 # ============================================================================
 
