@@ -4,7 +4,6 @@
 # for robotic manipulation. Extracts hidden states from images + text
 # instructions to condition the flow matching action head.
 #
-# Reference: ABot-Manipulation (amap-cvlab/ABot-Manipulation)
 
 import torch
 import torch.nn as nn

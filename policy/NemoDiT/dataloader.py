@@ -1,23 +1,6 @@
 # Dataloader for Qwen3VL + Flow Matching policy.
 #
-# Two changes over the previous RobotDataset implementation:
-#
-#   Fix A — per-worker persistent HDF5 handles.
-#       The previous implementation opened each episode HDF5 on every
-#       __getitem__ call, incurring a full H5Fopen/H5Fclose round-trip
-#       per sample (millions of syscalls over a full training run).
-#
-#       HDF5 user-space state is not fork-safe, so we cannot open files
-#       in __init__ and have them inherited by DataLoader workers. The
-#       fix is a None-sentinel lazy init: the main process records a
-#       *None* placeholder, and each worker independently creates its
-#       own dict on first access. Combined with persistent_workers=True
-#       on the DataLoader, each file is opened once per worker for the
-#       entire training run.
-#
-#   Instruction loading (ported from feature_update_VLMflowmatching).
-#       Per-episode JSON files are read to provide language-grounded
-#       task instructions for the Qwen3-VL processor.
+
 
 import glob
 import json
