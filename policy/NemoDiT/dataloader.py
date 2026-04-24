@@ -134,9 +134,11 @@ class RobotDataset(Dataset):
         """
         Build indices for sampling.
 
-        所有 timestep 均为合法 sample，边界处通过 padding 补齐:
-        - 左侧不足 n_obs_steps 帧时，用第 0 帧重复填充
-        - 右侧不足 future_action_window 帧时，用最后一帧重复填充
+        只保留两侧都不需要 padding 的合法起点，避免产生"输入重复首帧 +
+        输出重复末帧"的退化样本：
+        - 左侧：需要 n_obs_steps 帧完整观测，起点 t 必须满足 t >= n_obs_steps - 1
+        - 右侧：需要 future_action_window 帧完整动作，t 必须满足
+          t + future_action_window <= episode_length
 
         Returns:
             List of (episode_idx, action_start_timestep) tuples
@@ -154,8 +156,9 @@ class RobotDataset(Dataset):
 
                 episode_length = f[data_key].shape[0]
 
-                # 所有 timestep 都可作为 sample，边界处用 padding 补齐
-                for t in range(episode_length):
+                start = self.n_obs_steps - 1
+                end = episode_length - self.future_action_window + 1
+                for t in range(start, end):
                     indices.append((ep_idx, t))
 
         return indices
@@ -185,13 +188,6 @@ class RobotDataset(Dataset):
             actions = self._load_endpose_actions(f, start_idx)
         else:  # joint
             actions = self._load_joint_actions(f, start_idx)
-
-        # 右侧 padding: 当 start_idx + future_action_window 超出 episode 长度时，
-        # 用最后一帧的值重复填充
-        if actions.shape[0] < self.future_action_window:
-            pad_len = self.future_action_window - actions.shape[0]
-            padding = np.repeat(actions[-1:], pad_len, axis=0)
-            actions = np.concatenate([actions, padding], axis=0)
 
         return actions
 
@@ -253,9 +249,6 @@ class RobotDataset(Dataset):
             start_idx : start_idx + self.future_action_window
         ]  # (T,) or (T, 1) - gripper state
 
-        # Ensure correct shape
-        if left_joints.ndim == 1:
-            left_joints = left_joints[np.newaxis, :]
         if left_gripper.ndim == 1:
             left_gripper = left_gripper[:, np.newaxis]
 
@@ -267,8 +260,6 @@ class RobotDataset(Dataset):
                 start_idx : start_idx + self.future_action_window
             ]  # (T,) or (T, 1)
 
-            if right_joints.ndim == 1:
-                right_joints = right_joints[np.newaxis, :]
             if right_gripper.ndim == 1:
                 right_gripper = right_gripper[:, np.newaxis]
 
@@ -328,6 +319,8 @@ class RobotDataset(Dataset):
         例如 n_obs_steps=2, action_start_timestep=10:
             加载 timestep 9 和 10 的图像
 
+        索引合法性由 `_build_indices` 保证（t >= n_obs_steps - 1），不再做左侧 padding。
+
         Args:
             f: HDF5 file handle
             action_start_timestep: 动作序列的起始帧（也是观测序列的最后一帧）
@@ -338,13 +331,9 @@ class RobotDataset(Dataset):
         """
         obs_images = []
 
-        # 观测序列: 从 (action_start - n_obs_steps + 1) 到 action_start (包含)
         obs_start = action_start_timestep - self.n_obs_steps + 1
-
         for t in range(obs_start, action_start_timestep + 1):
-            # 左侧 padding: 当 t < 0 时，用第 0 帧重复填充
-            t_clamped = max(0, t)
-            frame_images = self._load_images(f, t_clamped)
+            frame_images = self._load_images(f, t)
             obs_images.append(frame_images)
 
         return obs_images

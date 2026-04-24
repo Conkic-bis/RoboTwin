@@ -47,11 +47,6 @@ future_action_window=12       # Number of future action steps to predict
 past_action_window=0          # Number of past action steps as context
 temporal_agg="concat"           # Temporal aggregation: last, mean, concat
 
-# Diffusion configuration
-diffusion_steps=100           # Number of diffusion steps
-noise_schedule="squaredcos_cap_v2"  # Noise schedule type
-ddim_steps=10                 # DDIM sampling steps (for inference)
-
 # Training configuration
 epochs=500                   # Number of training epochs
 batch_size=32                 # Batch size per GPU
@@ -119,8 +114,6 @@ python train.py \
     --future_action_window ${future_action_window} \
     --past_action_window ${past_action_window} \
     --temporal_agg ${temporal_agg} \
-    --diffusion_steps ${diffusion_steps} \
-    --noise_schedule ${noise_schedule} \
     --epochs ${epochs} \
     --batch_size ${batch_size} \
     --lr ${lr} \
