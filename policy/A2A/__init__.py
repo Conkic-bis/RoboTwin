@@ -1,1 +1,1 @@
-from . import deploy_policy
+from .deploy_policy import *
