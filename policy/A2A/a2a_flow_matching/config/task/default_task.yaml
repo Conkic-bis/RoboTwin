@@ -19,10 +19,12 @@ shape_meta: &shape_meta
       shape: *image_shape
       type: rgb
     agent_pos:
-      shape: [${action_dim}]
+      shape:
+        - ${action_dim}
       type: low_dim
   action:
-    shape: [${action_dim}]
+    shape:
+      - ${action_dim}
 
 dataset:
   _target_: a2a_flow_matching.dataset.robot_image_dataset.RobotImageDataset
