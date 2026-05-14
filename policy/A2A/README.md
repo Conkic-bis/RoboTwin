@@ -66,13 +66,17 @@ The ZARR groups: `data/head_camera`, `data/left_camera`, `data/right_camera`
 (uint8 NCHW), `data/state` and `data/action` (float32; state[t] =
 joint_action.vector[t], action[t] = vector[t+1]), `meta/episode_ends`.
 
-### 3. Train (action_dim = 14 for aloha-agilex; pass 16 for dual-Franka-like)
+### 3. Train
 
 ```bash
-bash train.sh beat_block_hammer demo_randomized 50 0 14 0
-#               task              config         N seed dim gpu
+bash train.sh beat_block_hammer demo_randomized 50 0 0
+#               task              config         N seed gpu
 # checkpoints land at ./checkpoints/<task>-<config>-<N>-<seed>/<epoch>.ckpt
 ```
+
+`action_dim` is read automatically from the zarr's `meta/action_dim` attr
+(written by `process_data.py`), so a single `robot_a2a.yaml` config works for
+14-dim aloha-agilex, 16-dim dual-Franka, or any other bimanual embodiment.
 
 ### 4. Evaluate (drives `script/eval_policy.py` with `policy_name=A2A`)
 
@@ -104,10 +108,8 @@ bash eval_double_env.sh beat_block_hammer demo_randomized demo_randomized 50 0 0
 
 ## Variants
 
-Configs:
-
-- `a2a_flow_matching/config/robot_a2a_14.yaml` — aloha-agilex / 14-dim.
-- `a2a_flow_matching/config/robot_a2a_16.yaml` — 16-dim embodiments.
+Single config: `a2a_flow_matching/config/robot_a2a.yaml` (action_dim
+auto-detected at training time from the zarr).
 
 Policies (both already ported under `a2a_flow_matching/policy/`):
 

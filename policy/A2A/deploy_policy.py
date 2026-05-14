@@ -7,8 +7,6 @@ Conforms to the contract enforced by script/eval_policy.py:
     reset_model(model)      -> per-episode reset hook
 """
 
-import os
-
 import numpy as np
 import yaml
 
@@ -38,31 +36,21 @@ def get_model(usr_args):
     seed = usr_args["seed"]
     ckpt_num = usr_args["checkpoint_num"]
 
-    action_dim = usr_args["left_arm_dim"] + usr_args["right_arm_dim"] + 2
-
     ckpt_file = (
         f"./policy/A2A/checkpoints/{task_name}-{ckpt_setting}-"
         f"{expert_data_num}-{seed}/{ckpt_num}.ckpt"
     )
 
-    config_path = (
-        f"./policy/A2A/a2a_flow_matching/config/robot_a2a_{action_dim}.yaml"
-    )
-    if not os.path.isfile(config_path):
-        raise FileNotFoundError(
-            f"No A2A config for action_dim={action_dim} at {config_path}. "
-            f"Add a robot_a2a_{action_dim}.yaml + matching task config."
-        )
+    # n_obs_steps / n_action_steps come straight from the policy yaml — they're
+    # not embodiment-dependent so a single config suffices.
+    config_path = "./policy/A2A/a2a_flow_matching/config/robot_a2a.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    n_obs_steps = cfg["n_obs_steps"]
-    n_action_steps = cfg["n_action_steps"]
-
     return A2A(
         ckpt_file,
-        n_obs_steps=n_obs_steps,
-        n_action_steps=n_action_steps,
+        n_obs_steps=cfg["n_obs_steps"],
+        n_action_steps=cfg["n_action_steps"],
         cam_keys=CAM_KEYS,
     )
 

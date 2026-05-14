@@ -1,20 +1,19 @@
 #!/bin/bash
 # Usage:
-#   bash train.sh <task_name> <task_config> <expert_data_num> <seed> <action_dim> <gpu_id>
+#   bash train.sh <task_name> <task_config> <expert_data_num> <seed> <gpu_id>
 # Example:
-#   bash train.sh beat_block_hammer demo_randomized 50 0 14 0
+#   bash train.sh beat_block_hammer demo_randomized 50 0 0
+#
+# action_dim is auto-detected from the zarr's meta attrs — no need to pass it.
 
 task_name=${1}
 task_config=${2}
 expert_data_num=${3}
 seed=${4}
-action_dim=${5}
-gpu_id=${6}
+gpu_id=${5}
 
 head_camera_type=D435
 DEBUG=False
-
-alg_name=robot_a2a_${action_dim}
 
 echo -e "\033[33mgpu id (to use): ${gpu_id}\033[0m"
 
@@ -33,7 +32,7 @@ if [ ! -d "./data/${task_name}-${task_config}-${expert_data_num}.zarr" ]; then
     bash process_data.sh "${task_name}" "${task_config}" "${expert_data_num}"
 fi
 
-python train.py --config-name=${alg_name}.yaml \
+python train.py --config-name=robot_a2a.yaml \
     task_name=${task_name} \
     task.dataset.zarr_path="data/${task_name}-${task_config}-${expert_data_num}.zarr" \
     training.debug=${DEBUG} \

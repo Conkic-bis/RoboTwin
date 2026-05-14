@@ -31,7 +31,6 @@ def get_model(usr_args):
     expert_data_num = usr_args["expert_data_num"]
     seed = usr_args["seed"]
     ckpt_num = usr_args["checkpoint_num"]
-    action_dim = usr_args["left_arm_dim"] + usr_args["right_arm_dim"] + 2
 
     ckpt_file = (
         f"./policy/A2A/checkpoints/{task_name}-{ckpt_setting}-"
@@ -39,9 +38,7 @@ def get_model(usr_args):
     )
 
     import yaml
-    config_path = (
-        f"./policy/A2A/a2a_flow_matching/config/robot_a2a_{action_dim}.yaml"
-    )
+    config_path = "./policy/A2A/a2a_flow_matching/config/robot_a2a.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 

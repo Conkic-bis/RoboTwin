@@ -1,6 +1,7 @@
-# RoboTwin task config (14-dim action: aloha-agilex / piper-like bimanual)
-# Image shape [3, H, W] is overwritten at runtime by train.py based on
-# head_camera_type (matching policy/DP/train.py behaviour).
+# RoboTwin task config. Both image shape and action_dim are overwritten at
+# runtime by train.py: image shape from task_config/_camera_config.yml via the
+# head_camera_type field, action_dim from the zarr file's meta attrs (written
+# by process_data.py).
 
 name: ${task_name}
 
@@ -18,10 +19,10 @@ shape_meta: &shape_meta
       shape: *image_shape
       type: rgb
     agent_pos:
-      shape: [14]
+      shape: [${action_dim}]
       type: low_dim
   action:
-    shape: [14]
+    shape: [${action_dim}]
 
 dataset:
   _target_: a2a_flow_matching.dataset.robot_image_dataset.RobotImageDataset

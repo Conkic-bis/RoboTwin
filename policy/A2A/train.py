@@ -1,18 +1,19 @@
 """A2A training entrypoint for RoboTwin.
 
 Usage (via train.sh):
-    python train.py --config-name=robot_a2a_14.yaml \
+    python train.py --config-name=robot_a2a.yaml \
         task.name=<task> \
         task.dataset.zarr_path=data/<task>-<config>-<N>.zarr \
         training.seed=<seed> \
         setting=<config> expert_data_num=<N> head_camera_type=D435
 
-The head_camera_type field is resolved against ../../task_config/_camera_config.yml
-to inject the correct [3, H, W] shape into every camera entry of shape_meta,
-matching policy/DP/train.py behaviour.
+`head_camera_type` is resolved against ../../task_config/_camera_config.yml to
+inject the correct [3, H, W] shape into every camera entry of shape_meta.
+
+`action_dim` is read directly from the zarr's `meta` attrs (process_data.py
+writes it), so callers don't have to pass it on the command line.
 """
 
-import os
 import pathlib
 import sys
 
@@ -44,11 +45,28 @@ def _resolve_camera_shape(head_camera_type: str):
     return [3, int(cam["h"]), int(cam["w"])]
 
 
+def _resolve_action_dim(zarr_path: str) -> int:
+    """Read action_dim from zarr meta attrs; fall back to state shape."""
+    import zarr  # local import: keep module load light
+
+    root = zarr.open(zarr_path, mode="r")
+    if "action_dim" in root["meta"].attrs:
+        return int(root["meta"].attrs["action_dim"])
+    return int(root["data"]["state"].shape[1])
+
+
 @hydra.main(
     version_base=None,
     config_path=str(HERE / "a2a_flow_matching" / "config"),
 )
 def main(cfg: OmegaConf):
+    # ---- inject action_dim from zarr meta ----
+    zarr_path = cfg.task.dataset.zarr_path
+    detected_dim = _resolve_action_dim(zarr_path)
+    cfg.action_dim = detected_dim
+    print(f"[A2A train] detected action_dim={detected_dim} from {zarr_path}")
+
+    # ---- inject camera shape from head_camera_type ----
     head_camera_type = cfg.get("head_camera_type", None)
     img_shape = None
     if head_camera_type is not None:
@@ -75,7 +93,7 @@ def main(cfg: OmegaConf):
 
     workspace_cls = hydra.utils.get_class(cfg._target_)
     workspace = workspace_cls(cfg)
-    print(f"[A2A train] task={cfg.task_name} zarr={cfg.task.dataset.zarr_path}")
+    print(f"[A2A train] task={cfg.task_name} zarr={zarr_path}")
     workspace.run()
 
 

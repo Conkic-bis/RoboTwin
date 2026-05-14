@@ -1,10 +1,17 @@
-# A2A on RoboTwin: bimanual variant, action_dim = 16 (e.g., dual-Franka 7+7+2 grippers)
-# Hyperparameters reproduce A2A's original `default_runner.yaml` + `default_train.yaml` +
-# `policy_config/a2a.yaml` verbatim, only adjusting paths/shapes for RoboTwin.
+# A2A on RoboTwin. Bimanual policy, action_dim auto-detected from the zarr's
+# meta attrs (written by process_data.py) and injected by train.py — no manual
+# 14-vs-16 selection required.
+# Hyperparameters reproduce A2A's original `default_runner.yaml` +
+# `default_train.yaml` + `policy_config/a2a.yaml` verbatim; only paths/shapes
+# differ for RoboTwin.
 
 defaults:
   - _self_
-  - task: default_task_16
+  - task: default_task
+
+# Set by train.py at runtime from zarr meta (process_data.py writes meta/action_dim).
+# Falls back to 14 (aloha-agilex) if a user hand-runs train.py without overrides.
+action_dim: 14
 
 name: a2a_${task_name}
 _target_: a2a_flow_matching.workspace.a2a_workspace.A2AWorkspace
