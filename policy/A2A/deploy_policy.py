@@ -68,12 +68,14 @@ def get_model(usr_args):
 
 
 def eval(TASK_ENV, model, observation):
-    """Run one action chunk against TASK_ENV."""
-    obs = encode_obs(observation)
-    _ = TASK_ENV.get_instruction()  # A2A is language-agnostic; we still consume it.
+    """Run one action chunk against TASK_ENV.
 
-    if len(model.runner.obs) == 0:
-        model.update_obs(obs)
+    Mirrors policy/DP/deploy_policy.py: the runner's stack_last_n() pads
+    early frames with the first observed obs, so no explicit pre-update is
+    needed and would actually duplicate the first frame in the deque.
+    """
+    obs = encode_obs(observation)
+    _ = TASK_ENV.get_instruction()  # A2A is language-agnostic.
 
     actions = model.get_action(obs)
 

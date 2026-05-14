@@ -235,13 +235,18 @@ class A2AWorkspace(BaseWorkspace):
                 ckpt_every = cfg.training.checkpoint_every
                 last_epoch = self.epoch + 1 >= cfg.training.num_epochs
                 if ((self.epoch + 1) % ckpt_every == 0) or last_epoch:
+                    # IMPORTANT: deploy_policy.py expects checkpoints at
+                    #   ./policy/A2A/checkpoints/<task>-<config>-<N>-<seed>/<epoch>.ckpt
+                    # The yaml's `ckpt_save_dir` already contains the
+                    # `./checkpoints/<task>-<config>-<N>-<seed>` prefix, so we
+                    # must NOT append another "checkpoints" segment here.
                     if save_root is None:
                         ckpt_path = pathlib.Path(self.output_dir).joinpath(
                             "checkpoints", f"{self.epoch + 1}.ckpt"
                         )
                     else:
                         ckpt_path = pathlib.Path(save_root).joinpath(
-                            "checkpoints", f"{self.epoch + 1}.ckpt"
+                            f"{self.epoch + 1}.ckpt"
                         )
                     self.save_checkpoint(str(ckpt_path))
 

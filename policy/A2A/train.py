@@ -50,6 +50,7 @@ def _resolve_camera_shape(head_camera_type: str):
 )
 def main(cfg: OmegaConf):
     head_camera_type = cfg.get("head_camera_type", None)
+    img_shape = None
     if head_camera_type is not None:
         img_shape = _resolve_camera_shape(str(head_camera_type))
         for cam_key in ("head_cam", "left_cam", "right_cam"):
@@ -57,6 +58,20 @@ def main(cfg: OmegaConf):
                 cfg.task.shape_meta.obs[cam_key].shape = img_shape
 
     OmegaConf.resolve(cfg)
+
+    # Re-apply after resolve — interpolated copies of shape_meta (cfg.shape_meta,
+    # cfg.policy.shape_meta, cfg.policy.obs_encoder.shape_meta) materialise into
+    # independent DictConfigs at resolve time, so we re-write the camera shape
+    # on every resolved alias to be safe. Mirrors policy/DP/train.py's defensive
+    # double-write pattern.
+    if img_shape is not None:
+        shape_meta_views = [cfg.task.shape_meta, cfg.shape_meta, cfg.policy.shape_meta]
+        if "obs_encoder" in cfg.policy and "shape_meta" in cfg.policy.obs_encoder:
+            shape_meta_views.append(cfg.policy.obs_encoder.shape_meta)
+        for view in shape_meta_views:
+            for cam_key in ("head_cam", "left_cam", "right_cam"):
+                if cam_key in view.obs:
+                    view.obs[cam_key].shape = img_shape
 
     workspace_cls = hydra.utils.get_class(cfg._target_)
     workspace = workspace_cls(cfg)
