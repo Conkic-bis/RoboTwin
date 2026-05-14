@@ -12,10 +12,11 @@ dependencies = [
     "numba",
     "torchcfm",
     "einops",
-    "diffusers",
+    "transformers",
     "zarr",
     "numcodecs",
     "h5py",
     "opencv-python",
     "dill",
+    "wandb",
 ]

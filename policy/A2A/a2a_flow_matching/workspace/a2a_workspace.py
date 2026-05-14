@@ -138,20 +138,34 @@ class A2AWorkspace(BaseWorkspace):
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
 
-        # Optional wandb hook — best-effort; never blocks training.
+        # Optional wandb hook — best-effort; failures fall back to JSON logging
+        # only and never block training.
         wandb_run = None
-        if getattr(cfg.logging, "mode", "disabled") in ("online", "offline"):
+        wandb_mode = str(getattr(cfg.logging, "mode", "disabled")).lower()
+        if wandb_mode in ("online", "offline"):
             try:
                 import wandb
                 logging_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
+                # `notes` / `id` / `group` are sometimes None and wandb.init
+                # rejects None values for several kwargs, so strip them.
+                logging_cfg = {k: v for k, v in logging_cfg.items() if v is not None}
                 wandb_run = wandb.init(
                     dir=str(self.output_dir),
                     config=OmegaConf.to_container(cfg, resolve=True),
                     **logging_cfg,
                 )
             except Exception as exc:  # noqa: BLE001
-                print(f"[A2AWorkspace] wandb disabled: {exc}")
+                print(f"[A2AWorkspace] wandb init failed ({exc}); continuing without wandb")
                 wandb_run = None
+            if wandb_run is not None:
+                # `.url` is only defined for online runs; fall back to `.dir`.
+                try:
+                    location = wandb_run.url if wandb_mode == "online" else wandb_run.dir
+                except Exception:  # noqa: BLE001
+                    location = self.output_dir
+                print(f"[A2AWorkspace] wandb {wandb_mode} run started: {location}")
+        else:
+            print(f"[A2AWorkspace] wandb {wandb_mode}; logging to {self.output_dir}/logs.json.txt only")
 
         log_path = os.path.join(self.output_dir, "logs.json.txt")
         train_sampling_batch = None

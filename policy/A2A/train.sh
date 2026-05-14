@@ -19,10 +19,15 @@ echo -e "\033[33mgpu id (to use): ${gpu_id}\033[0m"
 
 if [ "$DEBUG" = "True" ]; then
     wandb_mode=offline
-    echo -e "\033[33mDebug mode\033[0m"
+    echo -e "\033[33mDebug mode (wandb offline)\033[0m"
+elif [ -z "${WANDB_API_KEY:-}" ] && [ ! -f "$HOME/.netrc" ]; then
+    # No API key and no cached login -> fall back to offline so training
+    # doesn't block on `wandb login`.
+    wandb_mode=offline
+    echo -e "\033[33mWANDB_API_KEY not set; running wandb offline\033[0m"
 else
     wandb_mode=online
-    echo -e "\033[33mTrain mode\033[0m"
+    echo -e "\033[33mTrain mode (wandb online)\033[0m"
 fi
 
 export HYDRA_FULL_ERROR=1

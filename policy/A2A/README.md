@@ -78,6 +78,31 @@ bash train.sh beat_block_hammer demo_randomized 50 0 0
 (written by `process_data.py`), so a single `robot_a2a.yaml` config works for
 14-dim aloha-agilex, 16-dim dual-Franka, or any other bimanual embodiment.
 
+#### Logging with Weights & Biases (optional)
+
+Training logs `train_loss` / `val_loss` / `lr` / `global_step` / `epoch` per
+batch to a local `logs.json.txt` *and*, if available, to wandb. Behaviour:
+
+| Condition                         | wandb mode | What happens                          |
+| --------------------------------- | ---------- | ------------------------------------- |
+| `WANDB_API_KEY` set, `DEBUG=False`| `online`   | live run streamed to wandb.ai         |
+| API key unset (or no `~/.netrc`)  | `offline`  | run saved under `<output_dir>/wandb/` |
+| `DEBUG=True` in `train.sh`        | `offline`  | same as above                         |
+| `logging.mode=disabled` override  | disabled   | JSON file only, no wandb at all       |
+
+The fallback is automatic — `train.sh` checks for an API key before launching
+and switches to `offline` if missing, so no run ever blocks on `wandb login`.
+To customise project / entity / tags, override in CLI or edit
+`a2a_flow_matching/config/robot_a2a.yaml`'s `logging:` block.
+
+```bash
+# Force-disable wandb entirely:
+bash train.sh beat_block_hammer demo_randomized 50 0 0  # then in CLI pass
+python train.py ... logging.mode=disabled
+# Or for a team account:
+python train.py ... logging.entity=my-org logging.project=robotwin-a2a
+```
+
 ### 4. Evaluate (drives `script/eval_policy.py` with `policy_name=A2A`)
 
 ```bash

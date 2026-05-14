@@ -158,15 +158,18 @@ checkpoint:
 
 logging:
   project: RoboTwin_A2A_${task_name}
+  entity: null            # optional W&B team/org; null = personal account
   resume: False
-  mode: online
-  name: ${task_name}
+  mode: online            # online | offline | disabled — train.sh auto-switches
+                          # to offline if WANDB_API_KEY is not set
+  name: ${task_name}-${setting}-seed${training.seed}
   tags:
     - ${task_name}
     - a2a
     - ${exp_name}
   id: null
   group: null
+  notes: null
 
 multi_run:
   run_dir: ${ckpt_save_dir}
