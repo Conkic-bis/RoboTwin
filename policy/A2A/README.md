@@ -107,8 +107,23 @@ python train.py ... logging.entity=my-org logging.project=robotwin-a2a
 
 ```bash
 bash eval.sh beat_block_hammer demo_randomized demo_randomized 50 0 0
-# argv: task task_config ckpt_setting expert_data_num seed gpu_id
+# argv: task task_config ckpt_setting expert_data_num seed gpu_id [checkpoint_num]
 ```
+
+- `task_config` (arg 2) = eval-time scene config (domain randomization etc.).
+- `ckpt_setting` (arg 3) = the training `task_config` baked into the
+  checkpoint directory name. These can differ (e.g. train on `demo_clean`,
+  evaluate on `demo_randomized`).
+- `checkpoint_num` (arg 7, optional) = which epoch's `.ckpt` to load.
+  Defaults to `1000` (the final-epoch checkpoint of a full run). If that
+  exact file is absent — common for shorter / smoke-test runs —
+  `get_model()` automatically loads the **highest-numbered** `.ckpt` present
+  in the directory and prints which one it used, so eval always adapts to
+  the model you actually trained. To pin a specific epoch:
+
+  ```bash
+  bash eval.sh beat_block_hammer demo_randomized demo_randomized 50 0 0 200
+  ```
 
 For client/server-style evaluation (matches DP's `eval_double_env.sh`):
 

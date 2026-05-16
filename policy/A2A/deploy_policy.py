@@ -7,6 +7,10 @@ Conforms to the contract enforced by script/eval_policy.py:
     reset_model(model)      -> per-episode reset hook
 """
 
+import glob
+import os
+import re
+
 import numpy as np
 import yaml
 
@@ -14,6 +18,44 @@ from .a2a_model import A2A
 
 
 CAM_KEYS = ("head_cam", "left_cam", "right_cam")
+
+
+def _resolve_ckpt(ckpt_dir, ckpt_num):
+    """Return the requested checkpoint, or fall back to the latest available.
+
+    Training writes <epoch>.ckpt at every `checkpoint_every` interval plus the
+    final epoch (e.g. 50, 100, ..., 1000). A smoke-test / shorter run won't have
+    1000.ckpt, so rather than failing with an opaque torch.load error we pick
+    the highest-numbered checkpoint actually present.
+    """
+    if not os.path.isdir(ckpt_dir):
+        raise FileNotFoundError(
+            f"[A2A] checkpoint directory does not exist:\n  {ckpt_dir}\n"
+            f"Make sure ckpt_setting/expert_data_num/seed match the values "
+            f"used by train.sh (ckpt_setting must equal the training task_config)."
+        )
+
+    exact = os.path.join(ckpt_dir, f"{ckpt_num}.ckpt")
+    if os.path.isfile(exact):
+        return exact
+
+    candidates = []
+    for path in glob.glob(os.path.join(ckpt_dir, "*.ckpt")):
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if re.fullmatch(r"\d+", stem):
+            candidates.append((int(stem), path))
+    if not candidates:
+        raise FileNotFoundError(
+            f"[A2A] no <epoch>.ckpt found in:\n  {ckpt_dir}\n"
+            f"Directory exists but contains no numbered checkpoints."
+        )
+
+    latest_epoch, latest_path = max(candidates, key=lambda x: x[0])
+    print(
+        f"[A2A] requested checkpoint {ckpt_num}.ckpt not found; "
+        f"falling back to latest available: {latest_epoch}.ckpt"
+    )
+    return latest_path
 
 
 def encode_obs(observation):
@@ -36,10 +78,12 @@ def get_model(usr_args):
     seed = usr_args["seed"]
     ckpt_num = usr_args["checkpoint_num"]
 
-    ckpt_file = (
-        f"./policy/A2A/checkpoints/{task_name}-{ckpt_setting}-"
-        f"{expert_data_num}-{seed}/{ckpt_num}.ckpt"
+    ckpt_dir = (
+        f"./policy/A2A/checkpoints/"
+        f"{task_name}-{ckpt_setting}-{expert_data_num}-{seed}"
     )
+    ckpt_file = _resolve_ckpt(ckpt_dir, ckpt_num)
+    print(f"[A2A] loading checkpoint: {ckpt_file}")
 
     # n_obs_steps / n_action_steps come straight from the policy yaml — they're
     # not embodiment-dependent so a single config suffices.

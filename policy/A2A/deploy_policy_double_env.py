@@ -26,16 +26,20 @@ def encode_obs(observation):
 
 
 def get_model(usr_args):
+    from .deploy_policy import _resolve_ckpt
+
     task_name = usr_args["task_name"]
     ckpt_setting = usr_args["ckpt_setting"]
     expert_data_num = usr_args["expert_data_num"]
     seed = usr_args["seed"]
     ckpt_num = usr_args["checkpoint_num"]
 
-    ckpt_file = (
-        f"./policy/A2A/checkpoints/{task_name}-{ckpt_setting}-"
-        f"{expert_data_num}-{seed}/{ckpt_num}.ckpt"
+    ckpt_dir = (
+        f"./policy/A2A/checkpoints/"
+        f"{task_name}-{ckpt_setting}-{expert_data_num}-{seed}"
     )
+    ckpt_file = _resolve_ckpt(ckpt_dir, ckpt_num)
+    print(f"[A2A] loading checkpoint: {ckpt_file}")
 
     import yaml
     config_path = "./policy/A2A/a2a_flow_matching/config/robot_a2a.yaml"
