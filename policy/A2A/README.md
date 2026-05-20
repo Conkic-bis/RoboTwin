@@ -69,14 +69,24 @@ joint_action.vector[t], action[t] = vector[t+1]), `meta/episode_ends`.
 ### 3. Train
 
 ```bash
-bash train.sh beat_block_hammer demo_randomized 50 0 0
-#               task              config         N seed gpu
-# checkpoints land at ./checkpoints/<task>-<config>-<N>-<seed>/<epoch>.ckpt
+bash train.sh beat_block_hammer demo_randomized 50 0 0            # plain a2a
+bash train.sh beat_block_hammer demo_randomized 50 0 0 a2a_noise  # noise variant
+#               task              config         N seed gpu [variant]
+#
+# plain a2a   ckpt: ./checkpoints/<task>-<config>-<N>-<seed>/<epoch>.ckpt
+# a2a_noise   ckpt: ./checkpoints/<task>-<config>-<N>-<seed>-noise/<epoch>.ckpt
 ```
 
 `action_dim` is read automatically from the zarr's `meta/action_dim` attr
-(written by `process_data.py`), so a single `robot_a2a.yaml` config works for
-14-dim aloha-agilex, 16-dim dual-Franka, or any other bimanual embodiment.
+(written by `process_data.py`), so a single config works for 14-dim
+aloha-agilex, 16-dim dual-Franka, or any other bimanual embodiment.
+
+`variant` (optional 6th arg, default `a2a`) selects which A2A variant to
+train. Supported: `a2a` (plain), `a2a_noise` (history noise std=0.02,
+OT-coupled flow matcher — the upstream README's recommended deployment
+variant; mitigates compounding-error / jitter in closed-loop rollouts).
+The two variants save to **separate** checkpoint directories so you can
+train both for the same task/seed without overwriting.
 
 #### Logging with Weights & Biases (optional)
 
@@ -109,6 +119,10 @@ python train.py ... logging.entity=my-org logging.project=robotwin-a2a
 bash eval.sh beat_block_hammer demo_randomized demo_randomized 50 0 0
 # argv: task task_config ckpt_setting expert_data_num seed gpu_id [checkpoint_num]
 ```
+
+To evaluate the `a2a_noise` variant, edit `deploy_policy.yml` and set
+`variant: a2a_noise` (it controls which ckpt directory to load:
+`<...>-seed/` for `a2a`, `<...>-seed-noise/` for `a2a_noise`).
 
 - `task_config` (arg 2) = eval-time scene config (domain randomization etc.).
 - `ckpt_setting` (arg 3) = the training `task_config` baked into the
@@ -148,14 +162,27 @@ bash eval_double_env.sh beat_block_hammer demo_randomized demo_randomized 50 0 0
 
 ## Variants
 
-Single config: `a2a_flow_matching/config/robot_a2a.yaml` (action_dim
-auto-detected at training time from the zarr).
+Two ready-to-use variants. Pick at training time via train.sh's 6th arg, and
+at eval time via the `variant` field in `deploy_policy.yml`.
 
-Policies (both already ported under `a2a_flow_matching/policy/`):
+| Variant     | Config file              | Policy class           | Key difference from plain a2a                                                                                                                                                  | When to use |
+| ----------- | ------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- |
+| `a2a`       | `robot_a2a.yaml`         | `A2AImagePolicy`       | — (paper baseline; `ConditionalFlowMatcher`)                                                                                                                                   | reproduce paper / clean baseline |
+| `a2a_noise` | `robot_a2a_noise.yaml`   | `A2ANoiseImagePolicy`  | adds `history_noise_std=0.02` Gaussian noise to history states (both at train and inference) **and** switches the flow matcher to `ExactOptimalTransportConditionalFlowMatcher` | **closed-loop deployment** — the upstream README's explicit recommendation; mitigates compounding error / jitter when the flow source is commanded signal (which RoboTwin's `vector` is) |
 
-- `A2AImagePolicy` (default).
-- `A2ANoiseImagePolicy` — adds Gaussian noise to history actions; flip the
-  config's policy `_target_` to switch.
+Two upstream variants are intentionally **not** ported:
+
+- `a2a_mini` — upstream `yaml` references `vita.a2a_mini_policy` but that
+  Python file does not exist in the upstream repo. Dead / unreleased
+  ablation config (a model-size sweep that drops the action AE and uses an
+  8-layer flow_net).
+- `a2a_reg` — upstream `yaml` references `vita.a2a_reg_policy`, also missing.
+  Reverse ablation: replaces flow matching with a single MLP regression
+  pass (1 NFE instead of 6). Useful as a paper baseline only.
+
+If you need either of these later, the missing Python classes have to be
+authored from scratch (the upstream maintainers seem to have shipped the
+yaml but not the implementation).
 
 ## Reference
 

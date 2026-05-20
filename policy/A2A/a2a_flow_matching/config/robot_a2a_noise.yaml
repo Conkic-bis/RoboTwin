@@ -1,0 +1,188 @@
+# A2A-Noise on RoboTwin. Same as robot_a2a.yaml except:
+#   1. Policy class -> A2ANoiseImagePolicy (adds Gaussian noise to history
+#      states before encoding, both at training and inference).
+#   2. Flow matcher -> ExactOptimalTransportConditionalFlowMatcher (OT-coupled
+#      pairing of x_0 and x_1 — pairs better with noisy starts).
+#   3. history_noise_std: 0.02   <-- README's recommended deployment value
+#      (upstream a2a_noise.yaml uses 0.1; 0.02 is the value the paper's
+#      "Real-Robot Deployment" section explicitly recommends.)
+#   4. Checkpoint dir has a `-noise` suffix to keep ckpts separate from plain
+#      a2a runs with the same task/setting/N/seed.
+#
+# All other hyperparameters are bit-identical to robot_a2a.yaml.
+
+defaults:
+  - _self_
+  - task: default_task
+
+action_dim: 14
+
+name: a2a_noise_${task_name}
+_target_: a2a_flow_matching.workspace.a2a_workspace.A2AWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: "default"
+
+horizon: 16
+n_obs_steps: 8
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+policy:
+  _target_: a2a_flow_matching.policy.a2a_noise_image_policy.A2ANoiseImagePolicy
+
+  shape_meta: ${shape_meta}
+
+  obs_encoder:
+    _target_: a2a_flow_matching.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+    shape_meta: ${shape_meta}
+    rgb_model:
+      _target_: a2a_flow_matching.model.vision.model_getter.get_resnet
+      name: resnet18
+      weights: null
+    resize_shape: null
+    crop_shape: null
+    random_crop: True
+    use_group_norm: True
+    share_rgb_model: False
+    imagenet_norm: True
+
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+
+  decode_flow_latents: true
+  consistency_weight: 1
+  enc_contrastive_weight: 0.0
+  flow_contrastive_weight: 0.0
+  latent_dim: 512
+
+  # A2A-Noise specific: Gaussian noise std added to history states before
+  # encoding. README's "Real-Robot Deployment" section recommends 0.02 for
+  # closed-loop robustness (vs upstream yaml's 0.1).
+  history_noise_std: 0.02
+
+  flow_matcher:
+    _target_: a2a_flow_matching.model.flow_matchers.ExactOptimalTransportConditionalFlowMatcher
+    sigma: 0.0
+    num_sampling_steps: 6
+
+  flow_net:
+    hidden_dim: 512
+    num_layers: 4
+    mlp_ratio: 4
+    dropout: 0.0
+
+  action_ae:
+    kl_weight: 1e-6
+    enc_recon_weight: 0.5
+    flow_recon_weight: 0.5
+    recon_loss_type: l1
+    use_variational: true
+    freeze_encoder: false
+    freeze_decoder: false
+    net:
+      enc_hidden_dim: 512
+      dec_hidden_dim: 512
+      latent_dim: 512
+      num_heads: 8
+      mlp_ratio: 4
+      dropout: 0.0
+      num_layers: 4
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 1000
+  gradient_accumulate_every: 1
+  use_ema: True
+  freeze_encoder: False
+  rollout_every: 50
+  checkpoint_every: 50
+  val_every: 5
+  sample_every: 5
+  max_train_steps: 250
+  max_val_steps: 250
+  tqdm_interval_sec: 1.0
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+dataloader:
+  batch_size: 32
+  num_workers: 0
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: 32
+  num_workers: 0
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+ema:
+  _target_: a2a_flow_matching.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+setting: null
+expert_data_num: null
+head_camera_type: null
+# A2A-Noise checkpoints get a `-noise` suffix so they don't collide with
+# plain a2a checkpoints for the same task/setting/N/seed.
+ckpt_save_dir: ./checkpoints/${task_name}-${setting}-${expert_data_num}-${training.seed}-noise
+
+checkpoint:
+  save_root_dir: ${ckpt_save_dir}
+  topk:
+    monitor_key: test_mean_score
+    mode: max
+    k: 5
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+logging:
+  project: RoboTwin_A2A_Noise_${task_name}
+  entity: null
+  resume: False
+  mode: online
+  name: ${task_name}-${setting}-seed${training.seed}-noise
+  tags:
+    - ${task_name}
+    - a2a_noise
+    - ${exp_name}
+  id: null
+  group: null
+  notes: null
+
+multi_run:
+  run_dir: ${ckpt_save_dir}
+  wandb_name_base: ${task_name}_noise
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: ${ckpt_save_dir}
+  sweep:
+    dir: ${ckpt_save_dir}
+    subdir: ${hydra.job.num}

@@ -71,23 +71,39 @@ def encode_obs(observation):
     return obs
 
 
+# Map A2A variant -> (ckpt-dir suffix, config-yaml filename). Keep in sync with
+# train.sh's variant arg and the yamls under a2a_flow_matching/config/.
+_VARIANT_TO_SUFFIX = {
+    "a2a": "",
+    "a2a_noise": "-noise",
+}
+
+
 def get_model(usr_args):
     task_name = usr_args["task_name"]
     ckpt_setting = usr_args["ckpt_setting"]
     expert_data_num = usr_args["expert_data_num"]
     seed = usr_args["seed"]
     ckpt_num = usr_args["checkpoint_num"]
+    variant = usr_args.get("variant", "a2a")
+
+    if variant not in _VARIANT_TO_SUFFIX:
+        raise ValueError(
+            f"[A2A] unknown variant '{variant}'; expected one of "
+            f"{list(_VARIANT_TO_SUFFIX)}"
+        )
+    suffix = _VARIANT_TO_SUFFIX[variant]
 
     ckpt_dir = (
         f"./policy/A2A/checkpoints/"
-        f"{task_name}-{ckpt_setting}-{expert_data_num}-{seed}"
+        f"{task_name}-{ckpt_setting}-{expert_data_num}-{seed}{suffix}"
     )
     ckpt_file = _resolve_ckpt(ckpt_dir, ckpt_num)
-    print(f"[A2A] loading checkpoint: {ckpt_file}")
+    print(f"[A2A] variant={variant} loading checkpoint: {ckpt_file}")
 
-    # n_obs_steps / n_action_steps come straight from the policy yaml — they're
-    # not embodiment-dependent so a single config suffices.
-    config_path = "./policy/A2A/a2a_flow_matching/config/robot_a2a.yaml"
+    # n_obs_steps / n_action_steps are identical across variants today, but read
+    # from the variant's own yaml in case that changes in the future.
+    config_path = f"./policy/A2A/a2a_flow_matching/config/robot_{variant}.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
