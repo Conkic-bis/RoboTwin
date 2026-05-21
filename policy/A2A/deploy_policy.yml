@@ -1,0 +1,18 @@
+# Basic experiment configuration for A2A evaluation
+policy_name: A2A
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+expert_data_num: null
+checkpoint_num: 1000
+head_camera_type: D435
+action_type: qpos
+
+# Which A2A variant's checkpoint to evaluate. Must match the variant the model
+# was trained with (passed as train.sh's 6th positional arg).
+#   a2a       -> ckpt dir: policy/A2A/checkpoints/<task>-<setting>-<N>-<seed>/
+#   a2a_noise -> ckpt dir: policy/A2A/checkpoints/<task>-<setting>-<N>-<seed>-noise/
+variant: a2a
