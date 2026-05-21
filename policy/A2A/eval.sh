@@ -12,14 +12,23 @@
 #   seed             training seed (part of the ckpt dir name)
 #   gpu_id           CUDA device
 #   checkpoint_num   (optional) epoch number of the .ckpt to load.
-#                    Defaults to 1000 (the final-epoch checkpoint). If the
-#                    exact file is missing, get_model() auto-falls-back to
+#                    Defaults to deploy_policy.yml's checkpoint_num (1000). If
+#                    the exact file is missing, get_model() auto-falls-back to
 #                    the highest-numbered .ckpt in the directory.
 #
+# Env vars:
+#   A2A_VARIANT      (optional) which A2A variant to evaluate.
+#                    Defaults to deploy_policy.yml's `variant` field ("a2a").
+#                    Set to "a2a_noise" to load checkpoints from the
+#                    "-noise"-suffixed directory written by
+#                    `train.sh ... a2a_noise`.
+#                    Example:
+#                      A2A_VARIANT=a2a_noise bash eval.sh \
+#                          beat_block_hammer demo_clean demo_clean 50 0 0
+#
 # The trained checkpoint is expected at:
-#   ./policy/A2A/checkpoints/<task_name>-<ckpt_setting>-<expert_data_num>-<seed>/<checkpoint_num>.ckpt
-# which is exactly where train.sh writes it (ckpt_setting must equal the
-# task_config used during training).
+#   a2a       -> ./policy/A2A/checkpoints/<task>-<ckpt_setting>-<N>-<seed>/<ckpt_num>.ckpt
+#   a2a_noise -> ./policy/A2A/checkpoints/<task>-<ckpt_setting>-<N>-<seed>-noise/<ckpt_num>.ckpt
 
 policy_name=A2A
 task_name=${1}
@@ -37,7 +46,11 @@ cd ../..
 
 extra_overrides=""
 if [ -n "${checkpoint_num}" ]; then
-    extra_overrides="--checkpoint_num ${checkpoint_num}"
+    extra_overrides="${extra_overrides} --checkpoint_num ${checkpoint_num}"
+fi
+if [ -n "${A2A_VARIANT:-}" ]; then
+    extra_overrides="${extra_overrides} --variant ${A2A_VARIANT}"
+    echo -e "\033[33mA2A_VARIANT=${A2A_VARIANT} (overrides deploy_policy.yml)\033[0m"
 fi
 
 PYTHONWARNINGS=ignore::UserWarning \

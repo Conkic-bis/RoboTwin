@@ -120,9 +120,18 @@ bash eval.sh beat_block_hammer demo_randomized demo_randomized 50 0 0
 # argv: task task_config ckpt_setting expert_data_num seed gpu_id [checkpoint_num]
 ```
 
-To evaluate the `a2a_noise` variant, edit `deploy_policy.yml` and set
-`variant: a2a_noise` (it controls which ckpt directory to load:
-`<...>-seed/` for `a2a`, `<...>-seed-noise/` for `a2a_noise`).
+To evaluate the `a2a_noise` variant, either:
+
+- (one-off) set the `A2A_VARIANT` env var on the eval.sh call:
+  ```bash
+  A2A_VARIANT=a2a_noise bash eval.sh beat_block_hammer demo_clean demo_clean 50 0 0
+  # combine with checkpoint_num if needed:
+  A2A_VARIANT=a2a_noise bash eval.sh beat_block_hammer demo_clean demo_clean 50 0 0 500
+  ```
+- (persistent) edit `deploy_policy.yml` and set `variant: a2a_noise`.
+
+It selects which ckpt directory to load:
+`<...>-seed/` for `a2a`, `<...>-seed-noise/` for `a2a_noise`.
 
 - `task_config` (arg 2) = eval-time scene config (domain randomization etc.).
 - `ckpt_setting` (arg 3) = the training `task_config` baked into the
