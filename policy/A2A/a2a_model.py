@@ -58,9 +58,26 @@ class A2A:
         workspace: A2AWorkspace = workspace_cls(cfg, output_dir=None)
         workspace.load_payload(payload, exclude_keys=None, include_keys=None)
 
-        policy = workspace.model
-        if cfg.training.use_ema and workspace.ema_model is not None:
-            policy = workspace.ema_model
+        using_ema = bool(cfg.training.use_ema and workspace.ema_model is not None)
+        policy = workspace.ema_model if using_ema else workspace.model
+
+        # Surface the *actual* class & variant-defining hyperparameters from the
+        # loaded ckpt so the user can verify which model was reconstructed.
+        # RoboTwin's eval_policy.py prints "Policy Name: A2A" (= the folder
+        # name), which is unrelated to the variant; this block disambiguates.
+        try:
+            policy_target = str(cfg.policy._target_)
+            flow_target = str(cfg.policy.flow_matcher._target_)
+            history_noise_std = float(getattr(cfg.policy, "history_noise_std", 0.0))
+            print(
+                f"[A2A] reconstructed policy class: {policy_target}\n"
+                f"[A2A]   flow_matcher          : {flow_target}\n"
+                f"[A2A]   history_noise_std     : {history_noise_std}\n"
+                f"[A2A]   ema weights loaded    : {using_ema}\n"
+                f"[A2A]   num_sampling_steps    : {int(cfg.policy.flow_matcher.num_sampling_steps)}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[A2A] (could not introspect cfg for variant info: {exc})")
 
         policy.to(torch.device(device))
         policy.eval()
