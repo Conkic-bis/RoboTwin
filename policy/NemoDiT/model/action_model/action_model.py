@@ -1,6 +1,5 @@
 from model.action_model.models import DiT
-from model.action_model import create_diffusion
-from . import gaussian_diffusion as gd
+from model.action_model.flow_matching import FlowMatching
 from model.vision_input import VisionBackbone
 from model.feature_adaptation import create_feature_adapter
 import torch
@@ -28,20 +27,28 @@ DiT_models = {'DiT-S': DiT_S, 'DiT-B': DiT_B, 'DiT-L': DiT_L, 'DiT-XL': DiT_XL}
 
 class ActionModel(nn.Module):
     """
-    Diffusion-based Action Model for robot manipulation.
+    Flow Matching Action Model for robot manipulation.
 
-    支持多帧观测输入 (n_obs_steps) 和 state 条件输入。
+    基于 Rectified Flow / Conditional Flow Matching，参考:
+    - NVIDIA Isaac-GR00T: Beta 时间采样 + Euler ODE
+    - thu-ml/RDT-2: LogisticNormal 时间采样 + Euler ODE
+
+    Flow Matching 公式:
+        - 插值: x_t = (1-t) * noise + t * x_1  (t=0: 噪声, t=1: 数据)
+        - 速度场目标: v = x_1 - noise
+        - 损失: MSE(v_pred, v)
+        - 推理: ODE 从 t=0 积分到 t=1
 
     时序设计:
         n_obs_steps: 观测步数，用于视觉编码的历史帧数
-        n_action_steps: 动作执行步数，实际执行的动作数（比原来少1帧，因为 state 占了第0帧）
+        n_action_steps: 动作执行步数
         state: n_obs_steps 最后一帧 = action 第0帧时刻的机器人状态
 
         ┌───┬───┬───┬───┬───┬───┬───┬───┬───┬───┐
         │O-1│ O │ A │ A │ A │ A │ A │ A │ A │ A │...
         └───┴───┴───┴───┴───┴───┴───┴───┴───┴───┘
               │   │   └───────────────────────────┘
-              │   │     predicted actions (T-1 帧，有噪音)
+              │   │     predicted actions (T-1 帧)
               │   │
               │   └── state = action[0]，无噪音条件
               │
@@ -59,8 +66,16 @@ class ActionModel(nn.Module):
                  vision_pretrained,
                  num_cameras,
                  adapter_type,
-                 diffusion_steps=100,
-                 noise_schedule='squaredcos_cap_v2',
+                 # Flow matching parameters
+                 time_sampling='logit_normal',
+                 logit_normal_loc=0.0,
+                 logit_normal_scale=1.0,
+                 beta_alpha=1.5,
+                 beta_beta=1.0,
+                 num_timestep_buckets=1000,
+                 # Legacy diffusion params (accepted but ignored for compat)
+                 diffusion_steps=None,
+                 noise_schedule=None,
                  freeze_vision_backbone=False,
                  class_dropout_prob=0.1,
                  n_obs_steps=1,
@@ -69,26 +84,25 @@ class ActionModel(nn.Module):
                  ):
         super().__init__()
         self.in_channels = in_channels
-        self.noise_schedule = noise_schedule
         self.use_vision_condition = use_vision_condition
         self.n_obs_steps = n_obs_steps
-        # n_action_steps: 推理时实际执行的动作步数，默认等于 future_action_window_size
         self.n_action_steps = n_action_steps if n_action_steps is not None else future_action_window_size
         self.temporal_agg = temporal_agg
 
-        # GaussianDiffusion offers forward and backward functions q_sample and p_sample.
-        self.diffusion_steps = diffusion_steps
-        self.diffusion = create_diffusion(timestep_respacing="", noise_schedule=noise_schedule,
-                                          diffusion_steps=self.diffusion_steps, sigma_small=True, learn_sigma=False)
-        self.ddim_diffusion = None
-        if self.diffusion.model_var_type in [gd.ModelVarType.LEARNED, gd.ModelVarType.LEARNED_RANGE]:
-            learn_sigma = True
-        else:
-            learn_sigma = False
+        # Flow Matching replaces GaussianDiffusion
+        self.flow_matching = FlowMatching(
+            time_sampling=time_sampling,
+            logit_normal_loc=logit_normal_loc,
+            logit_normal_scale=logit_normal_scale,
+            beta_alpha=beta_alpha,
+            beta_beta=beta_beta,
+            num_timestep_buckets=num_timestep_buckets,
+        )
+
         self.past_action_window_size = past_action_window_size
         self.future_action_window_size = future_action_window_size
 
-        # 如果引入其他的模态，将以此设计其他的模态融合函数，If Not则不使用任何Condition进行进行生成轨迹
+        # Vision backbone and feature adapter
         if use_vision_condition:
             self.vision_backbone = VisionBackbone(
                 backbone_type=vision_backbone_type,
@@ -101,7 +115,6 @@ class ActionModel(nn.Module):
 
             vision_feature_dim = self.vision_backbone.get_output_dim()
 
-            # Create feature adapter to project vision features to token_size
             self.feature_adapter = create_feature_adapter(
                 adapter_type=adapter_type,
                 vision_feature_dim=vision_feature_dim,
@@ -117,7 +130,7 @@ class ActionModel(nn.Module):
             token_size=token_size,
             in_channels=in_channels,
             class_dropout_prob=class_dropout_prob,
-            learn_sigma=learn_sigma,
+            learn_sigma=False,
             future_action_window_size=future_action_window_size,
             past_action_window_size=past_action_window_size
         )
@@ -126,144 +139,125 @@ class ActionModel(nn.Module):
         """
         Encode images to vision condition features.
 
-        支持多帧观测输入，将多相机图像编码为单个全局视觉条件向量。
-        - 多帧聚合: 根据 temporal_agg 参数选择聚合方式 ('last', 'mean', 'concat')
-        - ResNet: 通过 Global Average Pooling 提取全局特征
-        - ViT: 通过 [CLS] token 提取全局特征
-        - 多相机特征融合后投影到 token_size 维度
-
         Args:
-            images: (batch_size, n_obs_steps, num_cameras, channels, height, width) - 多帧
-                   or (batch_size, num_cameras, channels, height, width) - 单帧
+            images: (batch_size, n_obs_steps, num_cameras, channels, height, width)
+                   or (batch_size, num_cameras, channels, height, width)
 
         Returns:
-            vision_condition: (batch_size, 1, token_size) - 单个全局视觉条件
+            vision_condition: (batch_size, 1, token_size)
         """
         if not self.use_vision_condition:
             raise ValueError("Vision condition is not enabled")
 
-        # Extract vision features (已融合多相机)
         vision_features = self.vision_backbone(images)  # (B, 1, vision_dim)
-
-        # Adapt features to token_size
         vision_condition = self.feature_adapter(vision_features)  # (B, 1, token_size)
-
         return vision_condition
 
-    # Given condition z, state and ground truth token x, compute loss
     def loss(self, x, z=None, images=None, state=None):
         """
-        Compute diffusion loss.
+        Compute flow matching loss.
 
-        噪音仅施加在 action[1:] 上 (即 x)，state (action[0]) 作为无噪音条件传入模型。
+        训练目标: 预测速度场 v = x_1 - noise
+        损失: MSE(v_pred, v_target)
 
         Args:
-            x: (batch_size, future_action_window_size - 1, in_channels) - ground truth actions (不含 state)
+            x: (batch_size, future_action_window_size - 1, in_channels) - ground truth actions
             z: (batch_size, 1, token_size) - precomputed vision condition (optional)
-            images: (batch_size, n_obs_steps, num_cameras, 3, H, W) - raw images (optional)
-                   or (batch_size, num_cameras, 3, H, W) for single frame
-            state: (batch_size, in_channels) - 机器人当前状态 (action[0])，无噪音
+            images: raw images (optional)
+            state: (batch_size, in_channels) - 机器人当前状态
 
         Returns:
             loss: scalar loss value
         """
-        # Encode vision condition if images are provided
         if images is not None and self.use_vision_condition:
             z = self.encode_vision_condition(images)
 
         if z is None:
             raise ValueError("Either z or images must be provided")
 
-        # sample random noise and timestep — 噪音仅施加在 actions 上，不影响 state
-        noise = torch.randn_like(x)  # [B, T-1, C]
-        timestep = torch.randint(0, self.diffusion.num_timesteps, (x.size(0),), device=x.device)
+        # Sample noise and continuous timesteps
+        noise = torch.randn_like(x)  # (B, T-1, C)
+        t = self.flow_matching.sample_time(x.size(0), x.device, dtype=x.dtype)  # (B,)
 
-        # sample x_t from x (forward diffusion on actions only)
-        x_t = self.diffusion.q_sample(x, timestep, noise)
+        # Compute noisy sample: x_t = (1-t)*noise + t*x_1
+        x_t = self.flow_matching.q_sample(x, t, noise)
 
-        # predict noise from x_t, with state as clean conditioning
-        noise_pred = self.net(x_t, timestep, z, state=state)
+        # Discretize timestep for embedding
+        t_discrete = self.flow_matching.discretize_timestep(t)
 
-        assert noise_pred.shape == noise.shape == x.shape
-        # Compute L2 loss
-        loss = ((noise_pred - noise) ** 2).mean()
-        # Optional: loss += loss_vlb
+        # Predict velocity from x_t
+        v_pred = self.net(x_t, t_discrete, z, state=state)
+
+        # Compute target velocity: v = x_1 - noise
+        v_target = self.flow_matching.compute_velocity(x, noise)
+
+        assert v_pred.shape == v_target.shape == x.shape
+        # MSE loss on velocity
+        loss = ((v_pred - v_target) ** 2).mean()
 
         return loss
 
-    # Create DDIM sampler
-    def create_ddim(self, ddim_step=10):
-        self.ddim_diffusion = create_diffusion(timestep_respacing="ddim" + str(ddim_step),
-                                               noise_schedule=self.noise_schedule,
-                                               diffusion_steps=self.diffusion_steps,
-                                               sigma_small=True,
-                                               learn_sigma=False
-                                               )
-        return self.ddim_diffusion
-
     @torch.no_grad()
-    def sample(self, images, state=None, ddim_steps=100, use_ddim=True, cfg_scale=0, return_all=False):
+    def sample(self, images, state=None, num_steps=10, cfg_scale=0, return_all=False,
+               ode_solver='midpoint',
+               # Legacy params kept for compatibility
+               ddim_steps=None, use_ddim=None):
         """
-        从观测图像和当前状态生成动作序列 (推理/采样)。
+        通过 ODE 积分生成动作序列。
 
-        推理流程:
-        1. 编码视觉条件: images -> z (B, 1, token_size)
-        2. 从高斯噪声开始，通过 DDIM 采样生成动作序列 (future_action_window - 1 帧)
-        3. 截取前 n_action_steps 步动作用于执行
+        从 t=0 (纯噪声) 积分到 t=1 (数据)。
 
         Args:
-            images: (B, n_obs_steps, num_cameras, C, H, W) - 多帧多相机观测
-                   or (B, num_cameras, C, H, W) - 单帧多相机
-            state: (B, in_channels) - 机器人当前状态 (n_obs_steps 最后一帧的动作值)
-            ddim_steps: DDIM 采样步数，越大质量越好但速度越慢 (default: 100)
-            use_ddim: 是否使用 DDIM 加速采样 (default: True)
-            cfg_scale: Classifier-free guidance scale (default: 1.5, 无 guidance)
-            return_all: 是否返回完整预测动作 (default: False)
+            images: (B, n_obs_steps, num_cameras, C, H, W)
+            state: (B, in_channels) - 机器人当前状态
+            num_steps: ODE 积分步数 (default: 10)
+            cfg_scale: Classifier-free guidance scale (default: 0, 无 guidance)
+            return_all: 是否返回完整预测动作
+            ode_solver: ODE 求解器类型 (default: 'midpoint')
+                - 'euler': 一阶 Euler 方法，速度快但精度低
+                - 'midpoint': 二阶中点法，精度高，推荐使用
+            ddim_steps: Legacy alias for num_steps (backward compat)
 
         Returns:
-            actions: (B, n_action_steps, in_channels) - 用于执行的动作序列
-                    如果 return_all=True，返回 (B, future_action_window_size - 1, in_channels)
+            actions: (B, n_action_steps, in_channels)
         """
+        # Legacy compatibility: ddim_steps -> num_steps
+        if ddim_steps is not None:
+            num_steps = ddim_steps
+
         device = next(self.parameters()).device
         batch_size = images.shape[0]
 
-        # 1. 编码视觉条件
+        # 1. Encode vision condition
         z = self.encode_vision_condition(images)  # (B, 1, token_size)
 
-        # 2. 准备采样器
-        if use_ddim:
-            if self.ddim_diffusion is None or self.ddim_diffusion.num_timesteps != ddim_steps:
-                self.create_ddim(ddim_steps)
-            diffusion = self.ddim_diffusion
-            sample_fn = diffusion.ddim_sample_loop
-        else:
-            diffusion = self.diffusion
-            sample_fn = diffusion.p_sample_loop
-
-        # 3. 定义模型包装器 (用于 CFG)
+        # 2. Define model wrapper (with optional CFG)
         if cfg_scale > 1.0:
-            # Classifier-free guidance: 需要同时计算条件和无条件预测
             def model_fn(x, t, **kwargs):
                 return self.net.forward_with_cfg(x, t, kwargs['z'], cfg_scale, state=kwargs.get('state'))
         else:
-            # 无 guidance，直接使用模型
             def model_fn(x, t, **kwargs):
                 return self.net(x, t, kwargs['z'], state=kwargs.get('state'))
 
-        # 4. DDIM/DDPM 采样 — 生成 future_action_window - 1 帧 (不含 state)
+        # 3. ODE sampling
         predict_length = self.future_action_window_size - 1
         shape = (batch_size, predict_length, self.in_channels)
+
+        if ode_solver == 'midpoint':
+            sample_fn = self.flow_matching.midpoint_sample
+        else:
+            sample_fn = self.flow_matching.euler_sample
+
         actions = sample_fn(
             model_fn,
             shape,
-            clip_denoised=False,  # 动作空间不需要 clip 到 [-1, 1]
-            model_kwargs={'z': z, 'state': state},
+            num_steps=num_steps,
             device=device,
-            progress=False,
+            model_kwargs={'z': z, 'state': state},
         )  # (B, future_action_window_size - 1, in_channels)
 
-        # 5. 截取 n_action_steps 步动作
+        # 4. Truncate to n_action_steps
         if return_all:
             return actions
         else:
-            return actions[:, :self.n_action_steps, :]  # (B, n_action_steps, in_channels)
+            return actions[:, :self.n_action_steps, :]

@@ -298,17 +298,12 @@ class FinalLayer(nn.Module):
 
 class DiT(nn.Module):
     """
-    Diffusion model with a Transformer backbone.
+    Flow Matching Transformer backbone for action generation.
 
-    支持 state 条件输入:
-        state 是机器人当前状态 (n_obs_steps 最后一帧 = action 第0帧)，
-        作为无噪音的条件 token 参与 transformer 计算。
+    使用 Rectified Flow 训练，模型预测速度场 v = x_1 - noise。
 
-        序列结构: [condition(t+z), state, noisy_action_1, ..., noisy_action_{T-1}]
-        - condition: timestep + vision condition (1 token)
-        - state: 机器人当前状态，无噪音 (1 token)
-        - noisy actions: 需要去噪的未来动作序列 (T-1 tokens)
-        总长度 = 1 + 1 + (T-1) = T+1，与原来的位置编码大小一致
+    序列结构: [condition(t+z), state, noisy_action_1, ..., noisy_action_{T-1}]
+    总长度 = 1 + 1 + (T-1) = T+1
     """
     def __init__(
         self,

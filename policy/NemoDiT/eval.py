@@ -10,7 +10,7 @@ from dataloader import RobotDataset
 
 def parse_args():
     """Parse command line arguments for evaluation."""
-    parser = argparse.ArgumentParser(description='Evaluate DiT Action Model')
+    parser = argparse.ArgumentParser(description='Evaluate Flow Matching DiT Action Model')
 
     # Checkpoint
     parser.add_argument('--checkpoint', type=str, required=True,
@@ -23,8 +23,11 @@ def parse_args():
                         help='Number of samples to evaluate (default: 5)')
 
     # Inference arguments
-    parser.add_argument('--ddim_steps', type=int, default=10,
-                        help='DDIM sampling steps (default: 10)')
+    parser.add_argument('--num_inference_steps', type=int, default=10,
+                        help='ODE integration steps (default: 10)')
+    parser.add_argument('--ode_solver', type=str, default='midpoint',
+                        choices=['euler', 'midpoint'],
+                        help='ODE solver: euler or midpoint (default)')
     parser.add_argument('--cfg_scale', type=float, default=1.0,
                         help='Classifier-free guidance scale (default: 1.0, no guidance)')
 
@@ -64,15 +67,20 @@ def load_model(checkpoint_path, device):
         in_channels=train_args['action_dim'],
         future_action_window_size=train_args['future_action_window'],
         past_action_window_size=train_args['past_action_window'],
-        diffusion_steps=train_args['diffusion_steps'],
-        noise_schedule=train_args['noise_schedule'],
+        # Flow matching parameters
+        time_sampling=train_args.get('time_sampling', 'logit_normal'),
+        logit_normal_loc=train_args.get('logit_normal_loc', 0.0),
+        logit_normal_scale=train_args.get('logit_normal_scale', 1.0),
+        beta_alpha=train_args.get('beta_alpha', 1.5),
+        beta_beta=train_args.get('beta_beta', 1.0),
+        num_timestep_buckets=train_args.get('num_timestep_buckets', 1000),
         use_vision_condition=True,
         vision_backbone_type=train_args['vision_backbone'],
-        vision_pretrained=False, 
+        vision_pretrained=False,
         num_cameras=train_args['num_cameras'],
         freeze_vision_backbone=False,
         adapter_type=train_args['adapter_type'],
-        class_dropout_prob=0.0, 
+        class_dropout_prob=0.0,
         n_obs_steps=train_args['n_obs_steps'],
         n_action_steps=train_args['n_action_steps'],
         temporal_agg=train_args['temporal_agg'],
@@ -123,32 +131,20 @@ def prepare_eval_dataloader(data_path, train_args):
 
 
 @torch.no_grad()
-def evaluate_sample(model, images, state, gt_actions, ddim_steps, cfg_scale, device):
+def evaluate_sample(model, images, state, gt_actions, num_steps, cfg_scale, device, ode_solver='midpoint'):
     """
     对单个样本进行评估。
-
-    Args:
-        model: ActionModel
-        images: (1, n_obs_steps, num_cameras, C, H, W) 观测图像
-        state: (1, action_dim) 机器人当前状态
-        gt_actions: (1, future_action_window - 1, action_dim) ground truth 动作 (不含 state)
-        ddim_steps: DDIM 采样步数
-        cfg_scale: CFG scale
-        device: 计算设备
-
-    Returns:
-        pred_actions: (n_action_steps, action_dim) 预测的动作
-        metrics: 评估指标字典
     """
     images = images.to(device)
     state = state.to(device)
     gt_actions = gt_actions.to(device)
 
-    # 推理生成动作 (with state conditioning)
+    # 推理生成动作 (Flow Matching ODE)
     pred_actions = model.sample(
         images,
         state=state,
-        ddim_steps=ddim_steps,
+        num_steps=num_steps,
+        ode_solver=ode_solver,
         cfg_scale=cfg_scale,
         return_all=False
     )  # (1, n_action_steps, action_dim)
@@ -198,12 +194,12 @@ model, train_args = load_model('checkpoints/100.pt', device)
 actions = model.sample(
     images,
     state=state,        # 机器人当前状态
-    ddim_steps=10,      # DDIM 采样步数
+    num_steps=10,       # ODE 积分步数
+    ode_solver='midpoint',  # 二阶中点法
     cfg_scale=1.0,      # CFG scale (1.0 = 无 guidance)
     return_all=False    # 只返回 n_action_steps 步
 )
 # actions shape: (batch_size, n_action_steps, action_dim)
-# 注意: 预测的是 state 之后的动作，不含 state 本身
 
 # 4. 执行动作 (receding horizon control)
 for i in range(n_action_steps):
@@ -233,7 +229,7 @@ for i in range(n_action_steps):
 
         pred_actions, metrics = evaluate_sample(
             model, images, state, gt_actions,
-            args.ddim_steps, args.cfg_scale, device
+            args.num_inference_steps, args.cfg_scale, device, args.ode_solver
         )
 
         all_mse.append(metrics['mse'])

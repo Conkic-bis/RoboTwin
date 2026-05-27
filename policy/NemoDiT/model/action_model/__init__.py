@@ -5,11 +5,12 @@
 
 from . import gaussian_diffusion as gd
 from .respace import SpacedDiffusion, space_timesteps
+from .flow_matching import FlowMatching
 
 
 def create_diffusion(
     timestep_respacing,
-    noise_schedule="linear", 
+    noise_schedule="linear",
     use_kl=False,
     sigma_small=False,
     predict_xstart=False,
