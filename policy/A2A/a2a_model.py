@@ -76,6 +76,15 @@ class A2A:
                 f"[A2A]   ema weights loaded    : {using_ema}\n"
                 f"[A2A]   num_sampling_steps    : {int(cfg.policy.flow_matcher.num_sampling_steps)}"
             )
+            # UnifiedBridgePolicy-only fields
+            source_mode = getattr(cfg.policy, "source_mode", None)
+            if source_mode is not None:
+                print(
+                    f"[A2A]   source_mode           : {source_mode}\n"
+                    f"[A2A]   latent_noise_std      : {float(getattr(cfg.policy, 'latent_noise_std', 0.0))}\n"
+                    f"[A2A]   condition_mode        : {getattr(cfg.policy, 'condition_mode', '?')}\n"
+                    f"[A2A]   backbone              : {getattr(cfg.policy, 'backbone', '?')}"
+                )
         except Exception as exc:  # noqa: BLE001
             print(f"[A2A] (could not introspect cfg for variant info: {exc})")
 

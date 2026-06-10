@@ -2,13 +2,19 @@
 # Usage:
 #   bash train.sh <task_name> <task_config> <expert_data_num> <seed> <gpu_id> [variant]
 # Example:
-#   bash train.sh beat_block_hammer demo_randomized 50 0 0            # plain a2a
-#   bash train.sh beat_block_hammer demo_randomized 50 0 0 a2a_noise  # noise variant
+#   bash train.sh beat_block_hammer demo_randomized 50 0 0             # plain a2a
+#   bash train.sh beat_block_hammer demo_randomized 50 0 0 a2a_noise   # noise variant
+#   bash train.sh beat_block_hammer demo_randomized 50 0 0 bridge      # unified bridge (MLP)
+#   bash train.sh beat_block_hammer demo_randomized 50 0 0 bridge_dit  # unified bridge (DiT)
 #
 # variant         (optional, default "a2a") which A2A variant to train.
-#                 Currently supported: a2a, a2a_noise.
+#                 Currently supported: a2a, a2a_noise, bridge, bridge_dit.
 #                 Selects ./a2a_flow_matching/config/robot_${variant}.yaml.
-#                 Noise variant saves to a separate ckpt dir (suffix "-noise").
+#                 Each non-default variant saves to its own ckpt dir suffix
+#                 ("-noise" / "-bridge" / "-bridge_dit").
+#                 Bridge ablations (source_mode / condition_mode / noise stds)
+#                 can be appended as extra hydra overrides after the args, e.g.
+#   bash train.sh ... bridge policy.source_mode=gaussian policy.condition_mode=concat
 #
 # action_dim is auto-detected from the zarr's meta attrs — no need to pass it.
 
@@ -62,4 +68,5 @@ python train.py --config-name=${config_file} \
     logging.mode=${wandb_mode} \
     setting=${task_config} \
     expert_data_num=${expert_data_num} \
-    head_camera_type=${head_camera_type}
+    head_camera_type=${head_camera_type} \
+    "${@:7}"

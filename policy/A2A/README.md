@@ -31,7 +31,7 @@ policy/A2A/
     ├── model/                    # flow_net, layers, action_ae, flow matchers,
     │   ├── vision/               #   multi_image_obs_encoder, ResNet getter, crop
     │   └── diffusion/ema_model.py
-    ├── policy/                   # base + A2A + A2A-Noise image policies
+    ├── policy/                   # base + A2A + A2A-Noise + UnifiedBridge policies
     ├── dataset/robot_image_dataset.py   # multi-cam zarr reader
     ├── env_runner/a2a_runner.py  # obs deque + chunked action retrieval
     ├── workspace/                # base_workspace, a2a_workspace (train loop)
@@ -69,12 +69,16 @@ joint_action.vector[t], action[t] = vector[t+1]), `meta/episode_ends`.
 ### 3. Train
 
 ```bash
-bash train.sh beat_block_hammer demo_randomized 50 0 0            # plain a2a
-bash train.sh beat_block_hammer demo_randomized 50 0 0 a2a_noise  # noise variant
-#               task              config         N seed gpu [variant]
+bash train.sh beat_block_hammer demo_randomized 50 0 0             # plain a2a
+bash train.sh beat_block_hammer demo_randomized 50 0 0 a2a_noise   # noise variant
+bash train.sh beat_block_hammer demo_randomized 50 0 0 bridge      # unified bridge (MLP)
+bash train.sh beat_block_hammer demo_randomized 50 0 0 bridge_dit  # unified bridge (DiT)
+#               task              config         N seed gpu [variant] [hydra overrides...]
 #
 # plain a2a   ckpt: ./checkpoints/<task>-<config>-<N>-<seed>/<epoch>.ckpt
 # a2a_noise   ckpt: ./checkpoints/<task>-<config>-<N>-<seed>-noise/<epoch>.ckpt
+# bridge      ckpt: ./checkpoints/<task>-<config>-<N>-<seed>-bridge/<epoch>.ckpt
+# bridge_dit  ckpt: ./checkpoints/<task>-<config>-<N>-<seed>-bridge_dit/<epoch>.ckpt
 ```
 
 `action_dim` is read automatically from the zarr's `meta/action_dim` attr
@@ -120,18 +124,20 @@ bash eval.sh beat_block_hammer demo_randomized demo_randomized 50 0 0
 # argv: task task_config ckpt_setting expert_data_num seed gpu_id [checkpoint_num]
 ```
 
-To evaluate the `a2a_noise` variant, either:
+To evaluate a non-default variant (`a2a_noise` / `bridge` / `bridge_dit`), either:
 
 - (one-off) set the `A2A_VARIANT` env var on the eval.sh call:
   ```bash
   A2A_VARIANT=a2a_noise bash eval.sh beat_block_hammer demo_clean demo_clean 50 0 0
+  A2A_VARIANT=bridge    bash eval.sh beat_block_hammer demo_clean demo_clean 50 0 0
   # combine with checkpoint_num if needed:
-  A2A_VARIANT=a2a_noise bash eval.sh beat_block_hammer demo_clean demo_clean 50 0 0 500
+  A2A_VARIANT=bridge_dit bash eval.sh beat_block_hammer demo_clean demo_clean 50 0 0 500
   ```
-- (persistent) edit `deploy_policy.yml` and set `variant: a2a_noise`.
+- (persistent) edit `deploy_policy.yml` and set `variant: <name>`.
 
-It selects which ckpt directory to load:
-`<...>-seed/` for `a2a`, `<...>-seed-noise/` for `a2a_noise`.
+It selects which ckpt directory to load: `<...>-seed/` for `a2a`,
+`<...>-seed-noise/` for `a2a_noise`, `<...>-seed-bridge/` for `bridge`,
+`<...>-seed-bridge_dit/` for `bridge_dit`.
 
 - `task_config` (arg 2) = eval-time scene config (domain randomization etc.).
 - `ckpt_setting` (arg 3) = the training `task_config` baked into the
@@ -171,13 +177,66 @@ bash eval_double_env.sh beat_block_hammer demo_randomized demo_randomized 50 0 0
 
 ## Variants
 
-Two ready-to-use variants. Pick at training time via train.sh's 6th arg, and
-at eval time via the `variant` field in `deploy_policy.yml`.
+Four ready-to-use variants. Pick at training time via train.sh's 6th arg, and
+at eval time via the `variant` field in `deploy_policy.yml` (or `A2A_VARIANT`).
 
-| Variant     | Config file              | Policy class           | Key difference from plain a2a                                                                                                                                                  | When to use |
-| ----------- | ------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- |
-| `a2a`       | `robot_a2a.yaml`         | `A2AImagePolicy`       | — (paper baseline; `ConditionalFlowMatcher`)                                                                                                                                   | reproduce paper / clean baseline |
-| `a2a_noise` | `robot_a2a_noise.yaml`   | `A2ANoiseImagePolicy`  | adds `history_noise_std=0.02` Gaussian noise to history states (both at train and inference) **and** switches the flow matcher to `ExactOptimalTransportConditionalFlowMatcher` | **closed-loop deployment** — the upstream README's explicit recommendation; mitigates compounding error / jitter when the flow source is commanded signal (which RoboTwin's `vector` is) |
+| Variant      | Config file              | Policy class           | Key difference from plain a2a                                                                                                                                                  | When to use |
+| ------------ | ------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- |
+| `a2a`        | `robot_a2a.yaml`         | `A2AImagePolicy`       | — (paper baseline; `ConditionalFlowMatcher`)                                                                                                                                   | reproduce paper / clean baseline |
+| `a2a_noise`  | `robot_a2a_noise.yaml`   | `A2ANoiseImagePolicy`  | adds `history_noise_std=0.02` Gaussian noise to history states (both at train and inference) **and** switches the flow matcher to `ExactOptimalTransportConditionalFlowMatcher` | **closed-loop deployment** — the upstream README's explicit recommendation; mitigates compounding error / jitter when the flow source is commanded signal (which RoboTwin's `vector` is) |
+| `bridge`     | `robot_bridge.yaml`      | `UnifiedBridgePolicy`  | unified source distribution (`gaussian`/`clean_history`/`noised_history`/`mixed_bridge`/`residual_history`) + RobotMAF multimodal condition + latent alignment (JEPA / InfoNCE / VICReg), MLP backbone | the unified-bridge framework on the lightweight backbone |
+| `bridge_dit` | `robot_bridge_dit.yaml`  | `UnifiedBridgePolicy`  | same as `bridge` but the vector field is a `DiTBridge` transformer with token-level MAF conditioning                                                                              | the unified-bridge framework on a high-capacity DiT backbone |
+
+### Unified Bridge Framework (`bridge` / `bridge_dit`)
+
+`UnifiedBridgePolicy` treats noise-to-action diffusion and action-to-action
+flow matching as endpoints of one family of *source distributions* in the
+shared action latent space:
+
+```
+z0 = E_hist(h + sigma_a*eps_a) + sigma_z*eps_z    (history-centered source)
+z1 = E_act(a+)                                    (future action latent, flow target)
+c  = RobotMAF(obs_tokens, hist_tokens, state_token)  (condition; never touches a+)
+
+z_t = (1-t) z0 + t z1,   v_theta(z_t, t, c) -> z1 - z0
+```
+
+Everything in the experimental matrix is a hydra override on the same code
+path (same action AE, same condition encoder, same parameter budget):
+
+```bash
+# source-distribution study (MLP group)
+bash train.sh <task> <cfg> 50 0 0 bridge policy.source_mode=gaussian        # noise-to-action flow
+bash train.sh <task> <cfg> 50 0 0 bridge policy.source_mode=clean_history   # A2A clean
+bash train.sh <task> <cfg> 50 0 0 bridge policy.source_mode=noised_history  # A2A-Noise
+bash train.sh <task> <cfg> 50 0 0 bridge                                    # ours: mixed_bridge
+bash train.sh <task> <cfg> 50 0 0 bridge policy.source_mode=residual_history # history-shifted residual
+
+# fusion ablation: concat vs MAF (noise-aware gated fusion)
+bash train.sh <task> <cfg> 50 0 0 bridge policy.condition_mode=concat
+
+# alignment ablation
+bash train.sh <task> <cfg> 50 0 0 bridge policy.jepa_weight=0 policy.align_weight=0
+bash train.sh <task> <cfg> 50 0 0 bridge policy.align_type=vicreg
+
+# source noise sweeps (sigma_a / sigma_z)
+bash train.sh <task> <cfg> 50 0 0 bridge policy.history_noise_std=0.1 policy.latent_noise_std=0.1
+
+# DiT group
+bash train.sh <task> <cfg> 50 0 0 bridge_dit policy.source_mode=gaussian    # Gaussian DiT flow
+bash train.sh <task> <cfg> 50 0 0 bridge_dit                                # ours on DiT
+```
+
+Training logs include per-loss metrics (`train_flow_loss`, `train_jepa_loss`,
+`train_align_loss`, `train_consistency_loss`), latent diagnostics
+(`train_source_target_dist`, `train_z1_var`, `train_z1_effective_rank`) and
+MAF gate interpretability values (`train_gate_visual` / `_history` / `_state`,
+`train_gate_entropy`) — the latent and gate metrics of the experimental plan.
+
+Note the bridge configs use `ConditionalFlowMatcher` (independent coupling)
+instead of the OT matcher: OT minibatch re-pairing would couple sample *i*'s
+history latent with sample *j*'s future latent and break the physical
+`(z0_i, z1_i, c_i)` correspondence the bridge depends on.
 
 Two upstream variants are intentionally **not** ported:
 

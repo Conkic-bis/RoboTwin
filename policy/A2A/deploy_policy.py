@@ -76,6 +76,8 @@ def encode_obs(observation):
 _VARIANT_TO_SUFFIX = {
     "a2a": "",
     "a2a_noise": "-noise",
+    "bridge": "-bridge",
+    "bridge_dit": "-bridge_dit",
 }
 
 

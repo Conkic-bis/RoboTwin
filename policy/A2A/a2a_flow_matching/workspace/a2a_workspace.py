@@ -212,6 +212,14 @@ class A2AWorkspace(BaseWorkspace):
                             "epoch": self.epoch,
                             "lr": lr_scheduler.get_last_lr()[0],
                         }
+                        # Policies may expose per-loss/diagnostic metrics
+                        # (e.g. UnifiedBridgePolicy's flow/jepa/align losses,
+                        # MAF gate values, latent collapse indicators).
+                        extra_metrics = getattr(self.model, "last_metrics", None)
+                        if extra_metrics:
+                            step_log.update(
+                                {f"train_{k}": v for k, v in extra_metrics.items() if k != "loss"}
+                            )
 
                         is_last = batch_idx == (len(train_loader) - 1)
                         if not is_last:

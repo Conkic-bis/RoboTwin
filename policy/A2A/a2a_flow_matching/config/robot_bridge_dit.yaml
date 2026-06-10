@@ -1,0 +1,203 @@
+# Unified Bridge Framework on RoboTwin — DiT backbone ("Ours: history-centered
+# bridge + MAF + alignment" in the proposal's DiT/Transformer group).
+#
+# Same unified-source code path as robot_bridge.yaml, but the bridge vector
+# field is a DiT (token-level MAF condition + AdaLN time/cond modulation)
+# instead of the lightweight A2A MLP — demonstrates the source-distribution
+# idea is architecture-agnostic (proposal section 8).
+#
+# DiT-group baselines via overrides:
+#   Gaussian DiT flow:        policy.source_mode=gaussian
+#   residual diffusion @hist: policy.source_mode=residual_history
+#   Ours (default):           policy.source_mode=mixed_bridge
+
+defaults:
+  - _self_
+  - task: default_task
+
+action_dim: 14
+
+name: bridge_dit_${task_name}
+_target_: a2a_flow_matching.workspace.a2a_workspace.A2AWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: "default"
+
+horizon: 16
+n_obs_steps: 8
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+policy:
+  _target_: a2a_flow_matching.policy.bridge_image_policy.UnifiedBridgePolicy
+
+  shape_meta: ${shape_meta}
+
+  obs_encoder:
+    _target_: a2a_flow_matching.model.vision.multi_image_obs_encoder.MultiImageObsEncoder
+    shape_meta: ${shape_meta}
+    rgb_model:
+      _target_: a2a_flow_matching.model.vision.model_getter.get_resnet
+      name: resnet18
+      weights: null
+    resize_shape: null
+    crop_shape: null
+    random_crop: True
+    use_group_norm: True
+    share_rgb_model: False
+    imagenet_norm: True
+
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+
+  # ---- unified source distribution ----
+  source_mode: mixed_bridge      # gaussian | clean_history | noised_history | mixed_bridge | residual_history
+  history_noise_std: 0.02        # sigma_a (raw action/state space)
+  latent_noise_std: 0.05         # sigma_z (latent space, mixed_bridge only)
+
+  # ---- condition encoder ----
+  condition_mode: maf            # concat | maf
+  maf:
+    token_dim: 256
+    num_layers: 2
+    num_heads: 8
+    mlp_ratio: 4.0
+    dropout: 0.0
+
+  # ---- latent alignment ----
+  jepa_weight: 0.1
+  align_weight: 0.01
+  align_type: infonce            # infonce | vicreg
+
+  # ---- backbone ----
+  backbone: dit
+  dit:
+    hidden_dim: 512
+    num_layers: 6
+    num_heads: 8
+    n_latent_tokens: 8           # latent_dim must be divisible by this
+    use_cond_tokens: true        # token-level MAF conditioning (in-context)
+    mlp_ratio: 4.0
+    dropout: 0.0
+
+  decode_flow_latents: true
+  consistency_weight: 1
+  latent_dim: 512
+
+  flow_matcher:
+    _target_: a2a_flow_matching.model.flow_matchers.ConditionalFlowMatcher
+    sigma: 0.0
+    num_sampling_steps: 6
+
+  action_ae:
+    kl_weight: 1e-6
+    enc_recon_weight: 0.5
+    flow_recon_weight: 0.5
+    recon_loss_type: l1
+    use_variational: true
+    freeze_encoder: false
+    freeze_decoder: false
+    net:
+      enc_hidden_dim: 512
+      dec_hidden_dim: 512
+      latent_dim: 512
+      num_heads: 8
+      mlp_ratio: 4
+      dropout: 0.0
+      num_layers: 4
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 1000
+  gradient_accumulate_every: 1
+  use_ema: True
+  freeze_encoder: False
+  rollout_every: 50
+  checkpoint_every: 50
+  val_every: 5
+  sample_every: 5
+  max_train_steps: 250
+  max_val_steps: 250
+  tqdm_interval_sec: 1.0
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+dataloader:
+  batch_size: 32
+  num_workers: 0
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: 32
+  num_workers: 0
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+ema:
+  _target_: a2a_flow_matching.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+setting: null
+expert_data_num: null
+head_camera_type: null
+ckpt_save_dir: ./checkpoints/${task_name}-${setting}-${expert_data_num}-${training.seed}-bridge_dit
+
+checkpoint:
+  save_root_dir: ${ckpt_save_dir}
+  topk:
+    monitor_key: test_mean_score
+    mode: max
+    k: 5
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+
+logging:
+  project: RoboTwin_A2A_Bridge_DiT_${task_name}
+  entity: null
+  resume: False
+  mode: online
+  name: ${task_name}-${setting}-seed${training.seed}-bridge_dit
+  tags:
+    - ${task_name}
+    - bridge_dit
+    - ${exp_name}
+  id: null
+  group: null
+  notes: null
+
+multi_run:
+  run_dir: ${ckpt_save_dir}
+  wandb_name_base: ${task_name}_bridge_dit
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: ${ckpt_save_dir}
+  sweep:
+    dir: ${ckpt_save_dir}
+    subdir: ${hydra.job.num}

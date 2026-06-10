@@ -59,6 +59,7 @@ class AdaLNBlock(nn.Module):
         num_heads,
         mlp_ratio=4.,
         dropout=0.,
+        max_seq_len=16,
     ):
         super().__init__()
         # self.norm1 = RMSNorm(dim)
@@ -67,7 +68,8 @@ class AdaLNBlock(nn.Module):
             dim,
             num_heads=num_heads,
             attn_drop=dropout,
-            proj_drop=dropout
+            proj_drop=dropout,
+            max_seq_len=max_seq_len,
         )
 
         def approx_gelu(): return nn.GELU(approximate="tanh")

@@ -19,16 +19,17 @@
 # Env vars:
 #   A2A_VARIANT      (optional) which A2A variant to evaluate.
 #                    Defaults to deploy_policy.yml's `variant` field ("a2a").
-#                    Set to "a2a_noise" to load checkpoints from the
-#                    "-noise"-suffixed directory written by
-#                    `train.sh ... a2a_noise`.
+#                    One of: a2a, a2a_noise, bridge, bridge_dit — selects the
+#                    matching ckpt dir suffix written by `train.sh ... <variant>`.
 #                    Example:
-#                      A2A_VARIANT=a2a_noise bash eval.sh \
+#                      A2A_VARIANT=bridge bash eval.sh \
 #                          beat_block_hammer demo_clean demo_clean 50 0 0
 #
 # The trained checkpoint is expected at:
-#   a2a       -> ./policy/A2A/checkpoints/<task>-<ckpt_setting>-<N>-<seed>/<ckpt_num>.ckpt
-#   a2a_noise -> ./policy/A2A/checkpoints/<task>-<ckpt_setting>-<N>-<seed>-noise/<ckpt_num>.ckpt
+#   a2a        -> ./policy/A2A/checkpoints/<task>-<ckpt_setting>-<N>-<seed>/<ckpt_num>.ckpt
+#   a2a_noise  -> ./policy/A2A/checkpoints/<task>-<ckpt_setting>-<N>-<seed>-noise/<ckpt_num>.ckpt
+#   bridge     -> ./policy/A2A/checkpoints/<task>-<ckpt_setting>-<N>-<seed>-bridge/<ckpt_num>.ckpt
+#   bridge_dit -> ./policy/A2A/checkpoints/<task>-<ckpt_setting>-<N>-<seed>-bridge_dit/<ckpt_num>.ckpt
 
 policy_name=A2A
 task_name=${1}

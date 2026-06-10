@@ -13,6 +13,8 @@ action_type: qpos
 
 # Which A2A variant's checkpoint to evaluate. Must match the variant the model
 # was trained with (passed as train.sh's 6th positional arg).
-#   a2a       -> ckpt dir: policy/A2A/checkpoints/<task>-<setting>-<N>-<seed>/
-#   a2a_noise -> ckpt dir: policy/A2A/checkpoints/<task>-<setting>-<N>-<seed>-noise/
+#   a2a        -> ckpt dir: policy/A2A/checkpoints/<task>-<setting>-<N>-<seed>/
+#   a2a_noise  -> ckpt dir: policy/A2A/checkpoints/<task>-<setting>-<N>-<seed>-noise/
+#   bridge     -> ckpt dir: policy/A2A/checkpoints/<task>-<setting>-<N>-<seed>-bridge/
+#   bridge_dit -> ckpt dir: policy/A2A/checkpoints/<task>-<setting>-<N>-<seed>-bridge_dit/
 variant: a2a
